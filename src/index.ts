@@ -405,8 +405,8 @@ export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): Monit
     },
 
     jobs: async (_raw, ctx) => {
-      const sessionID = requireDirectUserContext(ctx);
-      const jobs = registry.list().filter((job) => runtimes.get(job.jobID)?.sessionID === sessionID);
+      requireDirectUserContext(ctx);
+      const jobs = registry.list().filter((job) => runtimes.has(job.jobID));
       return formatJobs(jobs).text;
     },
 
