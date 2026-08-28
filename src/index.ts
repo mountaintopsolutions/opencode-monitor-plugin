@@ -256,6 +256,14 @@ export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): Monit
           if (event.jobID === jobID) scheduleTailWrite(jobID);
         };
         runner.on?.('output', bgOutputHandler);
+
+        // Deliver a startup notification to the chat so there is a visible log
+        // of when the job was spawned (not just the sidebar indicator).
+        void deliver({
+          sessionID, agent, jobID, kind: 'bg',
+          text: formatDelivery(`background ${jobID} started: ${parsed.command}`).text,
+          submit: true,
+        }, true).catch((error) => monitorDebug('plugin.background.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) }));
         void handle.exitPromise.then(async (code) => {
           monitorDebug('plugin.background.runner.exit', { jobID, sessionID, code });
           try {
@@ -349,6 +357,13 @@ export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): Monit
         runner.on?.('output', outputHandler);
         const handle = runner.run(jobID, parsed.command);
         monitorDebug('plugin.monitor.runner.started', { jobID, sessionID });
+
+        // Deliver a startup notification to the chat.
+        void deliver({
+          sessionID, agent, jobID, kind: 'mon',
+          text: formatDelivery(`monitor ${jobID} started: ${parsed.command}`).text,
+          submit: true,
+        }, true).catch((error) => monitorDebug('plugin.monitor.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) }));
         void handle.exitPromise.then((code) => {
           monitorDebug('plugin.monitor.runner.exit', { jobID, sessionID, code });
           engine?.flush();

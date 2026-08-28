@@ -62,8 +62,8 @@ function userCtx(sessionID = 's1'): PluginContext {
   return { sessionID, invocationOrigin: 'user', registerSlashCommand: vi.fn() };
 }
 
-function promptAsyncRequest(promptAsync: ReturnType<typeof vi.fn>): any {
-  return promptAsync.mock.calls[0]?.[0];
+function promptAsyncRequest(promptAsync: ReturnType<typeof vi.fn>, callIndex = 0): any {
+  return promptAsync.mock.calls[callIndex]?.[0];
 }
 
 describe('plugin command handlers', () => {
@@ -114,11 +114,17 @@ describe('plugin command handlers', () => {
 
     expect(result).toContain('started bg_1');
     await vi.waitFor(() => expect(promptAsync).toHaveBeenCalled(), { timeout: 3_000 });
-    const request = promptAsyncRequest(promptAsync);
-    expect(request.path.id).toBe('s1');
-    expect(request.body.agent).toBe('operator');
-    expect(request.body.parts[0]).toMatchObject({ type: 'text', synthetic: true, metadata: { opencodeMcpVisible: true, opencodeMonitorJobID: 'bg_1' } });
-    expect(request.body.parts[0].text).toContain('[stdout] ok');
+    // First call is the startup notification
+    const startRequest = promptAsyncRequest(promptAsync, 0);
+    expect(startRequest.path.id).toBe('s1');
+    expect(startRequest.body.agent).toBe('operator');
+    expect(startRequest.body.parts[0]).toMatchObject({ type: 'text', synthetic: true, metadata: { opencodeMcpVisible: true, opencodeMonitorJobID: 'bg_1' } });
+    expect(startRequest.body.parts[0].text).toContain('background bg_1 started');
+    // The exit delivery arrives later — find it among the calls
+    await vi.waitFor(() => {
+      const exitReq = promptAsync.mock.calls.find((c: any[]) => c[0]?.body?.parts?.[0]?.text?.includes('[stdout] ok'));
+      expect(exitReq).toBeTruthy();
+    }, { timeout: 3_000 });
     await hooks.__stop();
   });
 
@@ -384,10 +390,12 @@ describe('plugin command handlers', () => {
 
     await plugin.handlers.background('echo one', userCtx('s1'));
     runner.exits.get('bg_1')?.(0);
-    await vi.waitFor(() => expect(notified).toHaveLength(1));
+    await vi.waitFor(() => expect(notified).toHaveLength(2));
 
     expect(notified[0]).toMatchObject({ sessionID: 's1', jobID: 'bg_1', kind: 'bg', submit: true });
-    expect(notified[0].text).toContain('background bg_1 exited');
+    expect(notified[0].text).toContain('background bg_1 started');
+    expect(notified[1]).toMatchObject({ sessionID: 's1', jobID: 'bg_1', kind: 'bg', submit: true });
+    expect(notified[1].text).toContain('background bg_1 exited');
   });
 
   it('background startup failure does not leave an active job', async () => {
@@ -419,9 +427,11 @@ describe('plugin command handlers', () => {
       handler({ jobID: 'mon_1', seq: 1, stream: 'stdout', line: 'ERR happened', timestamp: Date.now() });
     }
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(notified).toHaveLength(1));
+    await vi.waitFor(() => expect(notified).toHaveLength(2));
     expect(notified[0]).toMatchObject({ sessionID: 's1', jobID: 'mon_1', kind: 'mon', submit: true });
-    expect(notified[0].text).toContain('ERR happened');
+    expect(notified[0].text).toContain('monitor mon_1 started');
+    expect(notified[1]).toMatchObject({ sessionID: 's1', jobID: 'mon_1', kind: 'mon', submit: true });
+    expect(notified[1].text).toContain('ERR happened');
 
     runner.exits.get('mon_1')?.(0);
     await vi.waitFor(() => expect(runner.outputHandlers.size).toBe(0));
