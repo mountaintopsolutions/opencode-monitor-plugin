@@ -46,6 +46,7 @@ export interface MonitorPluginDependencies {
   getCoalescedTicks?: () => number;
   getBridgeUp?: () => boolean;
   getScheduledPending?: () => number;
+  chatNotifications?: boolean;
 }
 
 export interface MonitorPlugin {
@@ -77,6 +78,10 @@ interface OpencodePluginInput {
   directory?: string;
   worktree?: string;
   serverUrl?: URL;
+}
+
+interface MonitorServerOptions {
+  chatNotifications?: boolean;
 }
 
 interface OpencodeConfigLike {
@@ -135,7 +140,7 @@ function windowToText(window: MonitorWindow): string {
 function backgroundText(jobID: string, code: number | null, runner: RunnerLike): string {
   const stdout = runner.tail(jobID, 'stdout').map((line) => `[stdout] ${line}`);
   const stderr = runner.tail(jobID, 'stderr').map((line) => `[stderr] ${line}`);
-  return [`background ${jobID} exited with code ${code ?? 'null'}`, ...stdout, ...stderr].join('\n');
+  return [`⚙↩ background ${jobID} exited with code ${code ?? 'null'}`, ...stdout, ...stderr].join('\n');
 }
 
 export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): MonitorPlugin {
@@ -144,6 +149,7 @@ export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): Monit
   const notify = deps.notify ?? appendSubmitToSession;
   const health = deps.health ?? bridgeHealth;
   const now = deps.now ?? (() => new Date());
+  const chatNotifications = deps.chatNotifications !== false;
   const runtimes = new Map<string, JobRuntime>();
   // A failed public job may still own a live process; status is not ownership.
   const owned = new Map<string, JobRuntime>();
@@ -314,11 +320,13 @@ export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): Monit
         runner.on?.('output', bgOutputHandler);
         // Deliver a startup notification to the chat so there is a visible log
         // of when the job was spawned (not just the sidebar indicator).
-        void deliver({
-          sessionID, agent, jobID, kind: 'bg',
-          text: formatDelivery(`background ${jobID} started: ${parsed.command}`).text,
-          submit: true,
-        }, true).catch((error) => monitorDebug('plugin.background.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) }));
+        if (chatNotifications) {
+          void deliver({
+            sessionID, agent, jobID, kind: 'bg',
+            text: formatDelivery(`⚙ background ${jobID} started: ${parsed.command}`).text,
+            submit: true,
+          }, true).catch((error) => monitorDebug('plugin.background.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) }));
+        }
         trackExit(jobID, handle.exitPromise.then(async (code) => {
           monitorDebug('plugin.background.runner.exit', { jobID, sessionID, code });
           try {
@@ -419,11 +427,13 @@ export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): Monit
         const handle = runner.run(jobID, parsed.command);
         monitorDebug('plugin.monitor.runner.started', { jobID, sessionID });
         // Deliver a startup notification to the chat.
-        void deliver({
-          sessionID, agent, jobID, kind: 'mon',
-          text: formatDelivery(`monitor ${jobID} started: ${parsed.command}`).text,
-          submit: true,
-        }, true).catch((error) => monitorDebug('plugin.monitor.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) }));
+        if (chatNotifications) {
+          void deliver({
+            sessionID, agent, jobID, kind: 'mon',
+            text: formatDelivery(`⚙ monitor ${jobID} started: ${parsed.command}`).text,
+            submit: true,
+          }, true).catch((error) => monitorDebug('plugin.monitor.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) }));
+        }
         trackExit(jobID, handle.exitPromise.then((code) => {
           monitorDebug('plugin.monitor.runner.exit', { jobID, sessionID, code });
           engine?.flush();
@@ -629,7 +639,17 @@ function sessionStatusFromEventStatus(status: unknown): 'idle' | 'busy' | 'retry
   return undefined;
 }
 
-export const server = async (input: OpencodePluginInput = {}): Promise<any> => {
+function armIdleFallback(bridge: BridgeServer, sessionID: string): void {
+  setTimeout(() => {
+    monitorDebug('server.idleFallback.fire', { sessionID });
+    bridge.setSessionStatus(sessionID, 'idle');
+  }, 1500).unref?.();
+}
+
+export const server = async (input: OpencodePluginInput = {}, pluginOptions?: Record<string, unknown>): Promise<any> => {
+  const serverOptions: MonitorServerOptions = {
+    chatNotifications: pluginOptions?.chatNotifications !== false,
+  };
   const statusScope = input.worktree || input.directory || process.cwd();
   let closing = false;
   let disposal: Promise<void> | undefined;
@@ -675,6 +695,7 @@ export const server = async (input: OpencodePluginInput = {}): Promise<any> => {
     getCoalescedTicks: () => bridge.idleQueue.peek().reduce((sum, e) => sum + (e.coalescedTickCount ?? 0), 0),
     getBridgeUp: () => true,
     getScheduledPending: () => scheduledPendingHolder.value,
+    chatNotifications: serverOptions.chatNotifications,
   });
   const scheduledPendingHolder = { value: 0 };
   // Update scheduled pending periodically via the plugin's accessor
