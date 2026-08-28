@@ -343,7 +343,7 @@ describe('plugin command handlers', () => {
     expect(jobs).not.toContain('loop_1');
   });
 
-  it('/jobs is scoped by session', async () => {
+  it('/jobs shows all scope jobs including other sessions', async () => {
     const runner = new FakeRunner();
     const plugin = createMonitorPlugin({ health: async () => undefined, runner });
 
@@ -352,7 +352,7 @@ describe('plugin command handlers', () => {
 
     const s1Jobs = await plugin.handlers.jobs('', userCtx('s1'));
     expect(s1Jobs).toContain('bg_1');
-    expect(s1Jobs).not.toContain('bg_2');
+    expect(s1Jobs).toContain('bg_2');
   });
 
   it('/cancel rejects cross-session jobs', async () => {

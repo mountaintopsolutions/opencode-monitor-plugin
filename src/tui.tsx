@@ -118,8 +118,8 @@ function useMonitorData(api: TuiPluginApi, sessionID?: string) {
   let lastLog = '';
   const refresh = () => {
     const snap = readMonitorStatus(scope(api));
-    const sessionJobs = sessionID ? snap.jobs.filter((job) => job.sessionID === sessionID) : [];
-    const visibleJobs = sessionJobs.length > 0 ? sessionJobs : snap.jobs;
+    // Show all jobs in the scope (worktree/folder), including subagent-spawned ones.
+    const visibleJobs = snap.jobs;
     setJobs(visibleJobs);
     setSnapshot(snap);
     const nextLog = JSON.stringify({ scope: scope(api), sessionID, snapshotJobs: snap.jobs.length, visibleJobs: visibleJobs.length });

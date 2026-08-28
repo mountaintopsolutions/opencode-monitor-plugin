@@ -161,7 +161,7 @@ describe('opencode monitor plugin integration', () => {
     scheduler.destroy();
   });
 
-  it('cross-session jobs and cancel are isolated', async () => {
+  it('cross-session cancel is isolated but jobs list shows all scope jobs', async () => {
     const runner = new FakeRunner();
     const plugin = createMonitorPlugin({ runner, health: async () => undefined });
 
@@ -171,7 +171,7 @@ describe('opencode monitor plugin integration', () => {
     await expect(plugin.handlers.cancel('bg_1', userCtx('s2'))).rejects.toThrow(/another session/);
     const s1Jobs = await plugin.handlers.jobs('', userCtx('s1'));
     expect(s1Jobs).toContain('bg_1');
-    expect(s1Jobs).not.toContain('bg_2');
+    expect(s1Jobs).toContain('bg_2');
   });
 
   it('queue overflow increments dropped counter', () => {
