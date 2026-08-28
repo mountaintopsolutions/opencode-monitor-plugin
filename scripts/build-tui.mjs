@@ -32,7 +32,7 @@ if (/<[A-Za-z][\w.-]*[\s/>]/.test(codeNoComments)) {
   console.error('build-tui: untransformed JSX remains in output')
   process.exit(1)
 }
-if (result.code.includes('./status-store.ts') || result.code.includes("from 'src/") || result.code.includes('from "src/')) {
+if (result.code.includes('./status-store.ts') || result.code.includes('from "src/') || result.code.includes('from \'src/')) {
   console.error('build-tui: output must not import src/ or .ts paths')
   process.exit(1)
 }
