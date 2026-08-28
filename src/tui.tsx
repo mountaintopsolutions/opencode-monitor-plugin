@@ -4,11 +4,10 @@ import { createMemo, createSignal, For, Show, onCleanup } from 'solid-js';
 import { readMonitorStatus, readMonitorTail, type MonitorIndicatorJob, type MonitorIndicatorSnapshot, type MonitorTailLine } from './status-store.js';
 import { monitorDebug } from './debug-log.js';
 
-// The host (och) registers <spinner> via opentui-spinner at TUI startup.
-// We do not import opentui-spinner here because it lives in the top-level
-// node_modules while @opentui/solid is nested in the plugin's node_modules,
-// causing a cross-module resolution failure. The <spinner> intrinsic is
-// always available because the host registers it before loading plugins.
+// The host (opencode) registers <spinner> via opentui-spinner at TUI startup and
+// injects its shared @opentui/solid runtime into plugins, so the <spinner>
+// intrinsic resolves without importing opentui-spinner as a direct dependency.
+// The host registers it before loading plugins.
 
 declare global {
   namespace JSX {
@@ -24,6 +23,13 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 
 type Theme = TuiPluginApi['theme']['current'];
 type Color = Theme['text'];
+
+type DisplayMode = 'compact' | 'detailed';
+
+function readDisplayMode(options: Record<string, unknown> | undefined): DisplayMode {
+  const raw = options?.mode ?? options?.display;
+  return raw === 'compact' ? 'compact' : 'detailed';
+}
 
 function scope(api: TuiPluginApi): string {
   return api.state.path.worktree || api.state.path.directory || process.cwd();
@@ -272,8 +278,9 @@ function Detail(props: { api: TuiPluginApi; session_id?: string }) {
   );
 }
 
-export const tui: TuiPlugin = async (api, _options, _meta) => {
-  monitorDebug('tui.init', { scope: scope(api) });
+export const tui: TuiPlugin = async (api, options, _meta) => {
+  const display = readDisplayMode(options);
+  monitorDebug('tui.init', { scope: scope(api), display });
   api.slots.register({
     order: 10_000,
     slots: {
@@ -288,10 +295,9 @@ export const tui: TuiPlugin = async (api, _options, _meta) => {
         );
       },
       sidebar_content(_ctx, props) {
-        return <Detail api={api} session_id={props.session_id} />;
-      },
-      sidebar_footer(_ctx, props) {
-        return <Compact api={api} session_id={props.session_id} />;
+        return display === 'compact'
+          ? <Compact api={api} session_id={props.session_id} />
+          : <Detail api={api} session_id={props.session_id} />;
       },
     },
   });
