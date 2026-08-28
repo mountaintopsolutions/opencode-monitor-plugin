@@ -61,6 +61,6 @@ describe('appendSubmitToSession notifier', () => {
     await server.start();
 
     await expect(appendSubmitToSession({ sessionID: 'missing', jobID: 'bg_1', kind: 'bg', text: 'x', submit: true }, configPath))
-      .rejects.toThrow(/status 409/);
+      .rejects.toThrow(/status 500/);
   });
 });

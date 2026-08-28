@@ -145,7 +145,7 @@ describe('BridgeServer HTTP API', () => {
     expect(await wrong.text()).not.toContain(config.token);
   });
 
-  it('rejects notify requests for unregistered sessions', async () => {
+  it('rejects notify requests when no sessions are registered at all', async () => {
     const server = new BridgeServer({ configPath: await tempConfigPath() });
     servers.push(server);
     const config = await server.start();
@@ -156,7 +156,64 @@ describe('BridgeServer HTTP API', () => {
       body: JSON.stringify(req('unseen-session')),
     });
 
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(500);
+  });
+
+  it('falls back to an idle registered session when original is unregistered', async () => {
+    const delivered: AppendNotification[] = [];
+    const server = new BridgeServer({
+      configPath: await tempConfigPath(),
+      onAppend: (payload) => {
+        delivered.push(payload);
+        return true;
+      },
+    });
+    servers.push(server);
+    const config = await server.start();
+
+    // Parent session registered and idle; subagent session never registered
+    server.setSessionStatus('parent', 'idle');
+
+    const response = await fetch(`${config.url}/notify/append-submit`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(req('subagent-gone', 'bg_1', 'result from subagent')),
+    });
+
+    expect(response.status).toBe(202);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].params.sessionID).toBe('parent');
+    expect(delivered[0].params.text).toContain('result from subagent');
+  });
+
+  it('falls back to any registered session when no idle session exists', async () => {
+    const delivered: AppendNotification[] = [];
+    const server = new BridgeServer({
+      configPath: await tempConfigPath(),
+      onAppend: (payload) => {
+        delivered.push(payload);
+        return true;
+      },
+    });
+    servers.push(server);
+    const config = await server.start();
+
+    // Only a busy parent session; subagent gone
+    server.setSessionStatus('parent', 'busy');
+
+    const response = await fetch(`${config.url}/notify/append-submit`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(req('subagent-gone', 'bg_2', 'queued for parent')),
+    });
+
+    expect(response.status).toBe(202);
+    expect(delivered).toEqual([]);
+
+    // Deliver when parent goes idle
+    server.setSessionStatus('parent', 'idle');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].params.sessionID).toBe('parent');
   });
 
   it('queues busy/retry/unknown sessions and delivers hidden synthetic notification only after idle', async () => {

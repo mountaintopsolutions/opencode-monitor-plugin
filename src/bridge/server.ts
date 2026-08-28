@@ -254,7 +254,13 @@ export class BridgeServer {
   notify(request: AutoSubmitRequest): void {
     monitorDebug('bridge.notify.start', { sessionID: request.sessionID, jobID: request.jobID, kind: request.kind, currentStatus: this.#idleQueue.getSessionStatus(request.sessionID), registered: this.#registeredSessions.has(request.sessionID) });
     if (!this.#registeredSessions.has(request.sessionID)) {
-      throw new Error('session is not registered');
+      const fallback = this.#findFallbackSession();
+      if (fallback) {
+        monitorDebug('bridge.notify.fallback', { originalSessionID: request.sessionID, fallbackSessionID: fallback, jobID: request.jobID, kind: request.kind });
+        request = { ...request, sessionID: fallback };
+      } else {
+        throw new Error('session is not registered and no fallback session is available');
+      }
     }
     this.#idleQueue.deliver(request);
     monitorDebug('bridge.notify.queued', { sessionID: request.sessionID, jobID: request.jobID, kind: request.kind, pendingCount: this.#idleQueue.pendingCount, currentStatus: this.#idleQueue.getSessionStatus(request.sessionID) });
@@ -262,6 +268,24 @@ export class BridgeServer {
       this.#idleQueue.flush(request.sessionID);
       monitorDebug('bridge.notify.flush.requested', { sessionID: request.sessionID, jobID: request.jobID, pendingCount: this.#idleQueue.pendingCount });
     }
+  }
+
+  /**
+   * Find a registered session to use as a fallback when the original
+   * session is no longer registered (e.g. a subagent that has exited).
+   * Prefers idle sessions, then falls back to any registered session.
+   */
+  #findFallbackSession(): string | undefined {
+    let idle: string | undefined;
+    let any: string | undefined;
+    for (const sid of this.#registeredSessions) {
+      any ??= sid;
+      if (this.#idleQueue.getSessionStatus(sid) === 'idle') {
+        idle = sid;
+        break;
+      }
+    }
+    return idle ?? any;
   }
 
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -297,10 +321,6 @@ export class BridgeServer {
     const request = parseAutoSubmitRequest(body);
     if (!request) {
       writeJson(res, 400, { error: 'invalid append request' });
-      return;
-    }
-    if (!this.#registeredSessions.has(request.sessionID)) {
-      writeJson(res, 409, { error: 'session is not registered' });
       return;
     }
 
