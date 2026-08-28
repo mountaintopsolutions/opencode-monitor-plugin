@@ -79,9 +79,10 @@ describe('opencode monitor plugin integration', () => {
     expect(delivered).toEqual([]);
 
     server.setSessionStatus('s1', 'idle');
-    await vi.waitFor(() => expect(delivered).toHaveLength(1));
-    expect(delivered[0].params.text).toContain('background bg_1 exited');
-    expect(delivered[0].params.text).toContain('full output');
+    await vi.waitFor(() => expect(delivered).toHaveLength(2));
+    expect(delivered[0].params.text).toContain('background bg_1 started');
+    expect(delivered[1].params.text).toContain('background bg_1 exited');
+    expect(delivered[1].params.text).toContain('full output');
   });
 
   it('monitor match queues until idle and duplicate seqs are not resent', async () => {
@@ -104,12 +105,12 @@ describe('opencode monitor plugin integration', () => {
     expect(delivered).toEqual([]);
 
     server.setSessionStatus('s1', 'idle');
-    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    await vi.waitFor(() => expect(delivered).toHaveLength(2));
     for (const handler of runner.outputHandlers) {
       handler({ jobID: 'mon_1', seq: 1, stream: 'stdout', line: 'ERR one again', timestamp: Date.now() });
     }
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(delivered).toHaveLength(1);
+    expect(delivered).toHaveLength(2);
   });
 
   it('coalesces loop backlog into one idle delivery with tick count metadata', async () => {
