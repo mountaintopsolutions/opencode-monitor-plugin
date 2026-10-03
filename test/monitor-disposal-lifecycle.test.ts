@@ -209,7 +209,11 @@ describe('owned monitor lifecycle disposal', () => {
     const { result, promptAsync } = await hooks();
     await result.tool.opencode_monitor_background.execute({ command: "printf 'ordered-status-fixture\\n'" }, toolContext());
     await result.event({ event: { type: 'session.idle', properties: { sessionID: 'owner' } } });
-    await vi.waitFor(() => expect(promptAsync).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    // Sync point only: this test is about status-write ordering, not delivery
+    // counts. A background job now emits both a spawn notification and a
+    // terminal result, and which of them has reached the bridge by the idle
+    // transition above is timing-dependent, so an exact count is racy here.
+    await vi.waitFor(() => expect(promptAsync).toHaveBeenCalled(), { timeout: 3000 });
     gate.resolve(); await firstCommitted.promise; await dispose(result);
     expect(statusStore.readMonitorStatus(root)).toMatchObject({ completedCount: 1, jobs: [], bridgeUp: false, scheduledPending: 0 });
   });
