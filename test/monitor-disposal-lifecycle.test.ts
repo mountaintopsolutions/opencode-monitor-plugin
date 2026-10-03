@@ -64,8 +64,8 @@ function helper(extra: Record<string, unknown> = {}) {
   cleanup.push(async () => { runner.releaseAll(); await turns(); await dispose(plugin); });
   return { runner, registry, notify, plugin };
 }
-async function hooks(promptAsync = vi.fn(async () => ({})), directory = root, pluginOptions?: Record<string, unknown>) {
-  const result = await server({ directory, worktree: directory, client: { session: { promptAsync } } }, pluginOptions);
+async function hooks(promptAsync = vi.fn(async () => ({})), directory = root) {
+  const result = await server({ directory, worktree: directory, client: { session: { promptAsync } } });
   cleanup.push(() => result.__stop());
   await result.event({ event: { type: 'session.status', properties: { sessionID: 'owner', status: { type: 'idle' } } } });
   return { result, promptAsync };
@@ -92,7 +92,7 @@ describe('owned monitor lifecycle disposal', () => {
   });
 
   it('awaits every owned background and monitor close before resolving concurrent disposal', async () => {
-    vi.useFakeTimers(); const f = helper({ chatNotifications: false });
+    vi.useFakeTimers(); const f = helper();
     await f.plugin.handlers.background('ordinary fixture', context());
     await f.plugin.handlers.monitor('--regex MATCH --before 0 --after 1 --debounce 1 -- ordinary fixture', context());
     f.runner.output('bg_1'); f.runner.output('mon_2');
@@ -109,7 +109,10 @@ describe('owned monitor lifecycle disposal', () => {
     expect(f.runner.listenerCount('output')).toBe(0);
     const calls = f.notify.mock.calls.length;
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(f.notify).toHaveBeenCalledTimes(calls); expect(calls).toBe(0);
+    expect(f.notify).toHaveBeenCalledTimes(calls);
+    // Both jobs announced themselves when they spawned. Cancellation then adds
+    // no further delivery, and disposal adds none either.
+    expect(calls).toBe(2);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -218,20 +221,28 @@ describe('owned monitor lifecycle disposal', () => {
     expect(statusStore.readMonitorStatus(root)).toMatchObject({ completedCount: 1, jobs: [], bridgeUp: false, scheduledPending: 0 });
   });
 
-  it('preserves a real harmless background result and one terminal state with one delivery', async () => {
+  it('preserves a real harmless background result and one terminal state across both deliveries', async () => {
     vi.mocked(statusStore.writeMonitorStatus).mockImplementation(originalWriteStatus);
-    // chatNotifications off: this asserts exactly one delivery, the terminal
-    // result. The startup notification is a separate concern with its own test.
-    const { result, promptAsync } = await hooks(undefined, undefined, { chatNotifications: false });
+    const { result, promptAsync } = await hooks();
     const nonce = 'monitor-disposal-positive-control';
     const response = await result.tool.opencode_monitor_background.execute({ command: `printf '${nonce}\\n'` }, toolContext());
     expect(response).toBe('started bg_1');
-    await vi.waitFor(() => expect(promptAsync).toHaveBeenCalledTimes(1), { timeout: 3000 });
-    expect(promptAsync.mock.calls[0]?.[0]).toMatchObject({ path: { id: 'owner' }, body: { parts: [{ metadata: { opencodeMonitorJobID: 'bg_1' } }] } });
+    // Two deliveries: the spawn announcement and the terminal result. The
+    // announcement is fired as a void deliver(), so its POST races the result's
+    // and either can land first — assert the set, not the sequence.
+    await vi.waitFor(() => expect(promptAsync).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    for (const call of promptAsync.mock.calls) {
+      expect(call[0]).toMatchObject({ path: { id: 'owner' }, body: { parts: [{ metadata: { opencodeMonitorJobID: 'bg_1' } }] } });
+    }
+    const texts = promptAsync.mock.calls.map((call) => String(call[0].body.parts[0].text));
+    expect(texts.some((text) => text.includes('⚙ background bg_1 started'))).toBe(true);
+    expect(texts.some((text) => text.includes('⚙↩ background bg_1 exited'))).toBe(true);
+    expect(texts.some((text) => text.includes(nonce))).toBe(true);
     expect(statusStore.writeMonitorStatus).toHaveBeenLastCalledWith(root, expect.objectContaining({ completedCount: 1 }));
     await vi.waitFor(() => expect(statusStore.readMonitorStatus(root).completedCount).toBe(1), { timeout: 3000 });
     await dispose(result); await new Promise(resolve => setTimeout(resolve, 50));
-    expect(promptAsync).toHaveBeenCalledTimes(1);
+    // Disposal adds no third delivery.
+    expect(promptAsync).toHaveBeenCalledTimes(2);
     expect(statusStore.readMonitorStatus(root).completedCount).toBe(1);
   });
 
@@ -239,7 +250,7 @@ describe('owned monitor lifecycle disposal', () => {
     const script = join(root, 'child.cjs'), ready = join(root, 'ready'), term = join(root, 'term'), release = join(root, 'release');
     await writeFile(script, `const fs=require('fs');process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(term)},'term');const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){clearInterval(t);process.exit(0)}},5)});fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1000);`);
     const runner = new ProcessRunner(); const notify = vi.fn(async () => {});
-    const plugin = createMonitorPlugin({ runner, notify, health: async () => {}, statusScope: root, chatNotifications: false });
+    const plugin = createMonitorPlugin({ runner, notify, health: async () => {}, statusScope: root });
     await plugin.handlers.background(`exec '${process.execPath.replaceAll("'", "'\\''")}' '${script.replaceAll("'", "'\\''")}'`, context());
     let cancelled: Promise<unknown> | undefined;
     cleanup.push(async () => { await writeFile(release, 'release'); if (cancelled) await cancelled; else await runner.cancel('bg_1').catch(() => {}); await dispose(plugin); });
@@ -251,6 +262,11 @@ describe('owned monitor lifecycle disposal', () => {
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(done).toBe(false); expect(() => process.kill(pid, 0)).not.toThrow();
     await writeFile(release, 'release'); await Promise.all([cancelled, closing]);
-    expect(() => process.kill(pid, 0)).toThrow(); expect(notify).not.toHaveBeenCalled();
+    expect(() => process.kill(pid, 0)).toThrow();
+    // Cancellation suppresses the terminal result but not the spawn notice, so
+    // exactly one delivery is expected and it is the announcement. Asserting the
+    // count and the content is what distinguishes "cancelled" from "silent".
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(String(notify.mock.calls[0]![0].text)).toContain('⚙ background bg_1 started');
   });
 });

@@ -27,9 +27,7 @@ it('joins independent cleanup and reports cancellation failure without waiting f
     tail: () => [], dispose: (id: string) => { disposed.push(id); },
   });
   const promptAsync = vi.fn(async () => { promptEntered.resolve(); await promptGate.promise; return {}; });
-  // chatNotifications off: this test owns promptAsync for its held loop delivery
-  // and asserts a single call. Startup notifications are covered separately.
-  const hooks = await server({ directory: root, worktree: root, client: { session: { promptAsync } } }, { chatNotifications: false });
+  const hooks = await server({ directory: root, worktree: root, client: { session: { promptAsync } } });
   let outcome: { kind: string; error?: unknown } | undefined;
   let closing: Promise<void> | undefined;
   try {
@@ -57,7 +55,11 @@ it('joins independent cleanup and reports cancellation failure without waiting f
     });
     expect(connection).toBe('ECONNREFUSED');
     await expect(hooks.tool.opencode_monitor_background.execute({ command: 'must not start' }, context())).rejects.toThrow(/disposed|closed|closing/i);
-    expect(ids).toHaveLength(2); expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(ids).toHaveLength(2);
+    // One spawn announcement per background job, plus the held loop delivery.
+    // The failed child's exit stays unresolved, so its terminal result never
+    // arrives — that is the behaviour under test.
+    expect(promptAsync).toHaveBeenCalledTimes(3);
   } finally {
     failedExit.resolve(null); goodExit.resolve(null); goodCancel.resolve(); promptGate.resolve();
     await closing;
