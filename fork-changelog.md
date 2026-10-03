@@ -48,6 +48,29 @@ These predate the v2 work and were only rebased, not rewritten.
 | `bf116d4` | fix: register spawn-time and window deliveries with the disposal tracker |
 | `0684baa` | test: fix three timing and ordering assumptions that flake under load |
 | `6f12134` | test: assert real delivery behaviour instead of disabling notifications |
+| `f886de3` | test: wait for the terminal delivery in the status-write ordering test |
+
+## README diverges from upstream
+
+`README.md` was untouched by the rebase, so it still described upstream's `main`.
+That was actively wrong for this fork in three ways, all since fixed:
+
+- **Prerequisites demanded `och`.** It required a custom OpenCode build
+  (>= 1.17.11-RC1) and linked an install script from `s3.casonatto.dev`. That
+  requirement is exactly what `d5f0e4f` removed, and `package.json` already said
+  so — README and manifest contradicted each other. Now states Node >= 22 and
+  vanilla OpenCode >= 1.17.11, and notes that the OpenTUI runtime packages are
+  regular dependencies rather than optional peers.
+- **`chatNotifications` was undocumented.** The branch's headline feature had no
+  configuration section at all. Added one, plus mentions in Capabilities and in
+  the delivery model.
+- **The delivery model did not mention spawn announcements** — a real
+  user-visible behaviour change, one extra message per background/monitor job.
+
+The README still uses the v1 `"plugin"` config key throughout, which is correct
+for now: this branch targets OpenCode v1 and the v2 port has not started. It
+will need revisiting then (`plugins`, and a separate CLI-plugin file for the
+TUI half).
 
 ## Changes worth upstreaming on their own merits
 
