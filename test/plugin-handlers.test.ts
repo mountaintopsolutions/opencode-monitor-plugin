@@ -511,3 +511,53 @@ describe('chatNotifications startup delivery', () => {
     expect(disabled).toEqual([]);
   });
 });
+
+// Guards the dual-loader export shape. v1 requires an object with server();
+// v2 requires id + setup and resolves dist/server.js in preference to
+// dist/index.js. A regression in either half is invisible to the other
+// loader's test suite, and the v2 half silently failed once already when
+// src/server.ts re-exported only `server`.
+describe('dual v1/v2 export shape', () => {
+  it('default export carries id, setup and server', async () => {
+    const mod = await import('../src/index.js');
+    expect(typeof mod.default).toBe('object');
+    expect(mod.default.id).toBe('opencode-monitor');
+    expect(typeof mod.default.setup).toBe('function');
+    expect(typeof mod.default.server).toBe('function');
+    expect(mod.default.server).toBe(mod.server);
+  });
+
+  it('the v2 runtime entry re-exports the same default, not a bare server', async () => {
+    const index = await import('../src/index.js');
+    const entry = await import('../src/server.js');
+    expect(entry.default).toBe(index.default);
+    expect(typeof entry.default).toBe('object');
+    expect(typeof entry.default.setup).toBe('function');
+  });
+
+  it('the v2 setup registers all six tools and all six commands', async () => {
+    const mod = await import('../src/index.js');
+    const added: { tools: any[]; commands: any[] } = { tools: [], commands: [] };
+    const ctx = {
+      location: { directory: '/fixture' },
+      options: {},
+      session: { synthetic: async () => ({}) },
+      tool: { transform: async (cb: any) => cb({ add: (t: any) => added.tools.push(t) }) },
+      command: { transform: async (cb: any) => cb({ add: (c: any) => added.commands.push(c) }) },
+      event: { subscribe: () => ({ [Symbol.asyncIterator]: async function* () {} }) },
+    };
+    const cleanup = await mod.default.setup(ctx as any);
+    expect(added.tools.map((t) => t.name).sort()).toEqual(
+      ['background', 'cancel', 'jobs', 'loop', 'monitor', 'schedule'],
+    );
+    for (const tool of added.tools) {
+      expect(tool.input.type).toBe('object');
+      expect(tool.input.additionalProperties).toBe(false);
+      expect(typeof tool.execute).toBe('function');
+    }
+    expect(added.commands.map((c) => c.name).sort()).toEqual(
+      ['background', 'cancel', 'jobs', 'loop', 'monitor', 'schedule'],
+    );
+    await cleanup();
+  });
+});

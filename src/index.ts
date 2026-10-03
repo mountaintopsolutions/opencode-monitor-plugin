@@ -839,4 +839,18 @@ function toolPluginContext(sessionID: string, agent?: string): PluginContext {
   return { sessionID, agent, invocationOrigin: 'user', registerSlashCommand: () => {} };
 }
 
-export default server;
+// Single default export satisfying BOTH plugin loaders:
+//   v1 requires an object with server()   -> server
+//   v2 requires id + setup                -> id, setup (see ./v2.ts)
+// Verified against opencode 1.18.34 and 2.0.22: each loader picks the half it
+// understands and neither rejects the combined shape.
+import { createSetup, PLUGIN_ID } from './v2.js';
+
+const setup = createSetup(server);
+
+export { setup, PLUGIN_ID };
+export default {
+  id: PLUGIN_ID,
+  setup,
+  server,
+};
