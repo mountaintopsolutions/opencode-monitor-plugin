@@ -195,7 +195,8 @@ the TUI plugin surface, so it becomes a CLI plugin configured in
   `npm ci --ignore-scripts` — the plain `npm install` fails because the
   `prepare` script runs a build that needs the broken `tsc` first.
 - `npm test` = `vitest run`, 342 tests. `npm run typecheck` = `tsc --noEmit`.
-- A stray macOS `.DS_Store` is present at the repo root and is not ignored.
+- A stray macOS `.DS_Store` sat at the repo root. It was already covered by
+  `.gitignore` and was never tracked, so removing it was cosmetic only.
 - Safety refs kept locally after the rebase: `backup/pre-rebase-v2` (the
   pre-rebase tip `f97fde4`) and `rebased-v2-port`. Neither is pushed; delete
   them once the branch is comfortable upstream.

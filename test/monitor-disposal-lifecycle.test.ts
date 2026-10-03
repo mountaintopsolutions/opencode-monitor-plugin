@@ -212,12 +212,20 @@ describe('owned monitor lifecycle disposal', () => {
     const { result, promptAsync } = await hooks();
     await result.tool.opencode_monitor_background.execute({ command: "printf 'ordered-status-fixture\\n'" }, toolContext());
     await result.event({ event: { type: 'session.idle', properties: { sessionID: 'owner' } } });
-    // Sync point only: this test is about status-write ordering, not delivery
-    // counts. A background job now emits both a spawn notification and a
-    // terminal result, and which of them has reached the bridge by the idle
-    // transition above is timing-dependent, so an exact count is racy here.
-    await vi.waitFor(() => expect(promptAsync).toHaveBeenCalled(), { timeout: 3000 });
-    gate.resolve(); await firstCommitted.promise; await dispose(result);
+    // Wait for the terminal result specifically, not merely any delivery. A
+    // background job also emits a spawn notification, and that one can arrive
+    // first — waiting on "some call" let dispose() race the job's completion and
+    // failed the completedCount assertion below. The terminal delivery is the
+    // sync point this test actually needs.
+    await vi.waitFor(
+      () => expect(promptAsync.mock.calls.some((call) => String(call[0].body.parts[0].text).includes('exited'))).toBe(true),
+      { timeout: 3000 },
+    );
+    gate.resolve(); await firstCommitted.promise;
+    // registry.complete runs just after the terminal delivery, so settle it
+    // before disposing rather than relying on the delivery having been observed.
+    await vi.waitFor(() => expect(statusStore.readMonitorStatus(root).completedCount).toBe(1), { timeout: 3000 });
+    await dispose(result);
     expect(statusStore.readMonitorStatus(root)).toMatchObject({ completedCount: 1, jobs: [], bridgeUp: false, scheduledPending: 0 });
   });
 
