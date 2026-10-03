@@ -27,7 +27,9 @@ it('joins independent cleanup and reports cancellation failure without waiting f
     tail: () => [], dispose: (id: string) => { disposed.push(id); },
   });
   const promptAsync = vi.fn(async () => { promptEntered.resolve(); await promptGate.promise; return {}; });
-  const hooks = await server({ directory: root, worktree: root, client: { session: { promptAsync } } });
+  // chatNotifications off: this test owns promptAsync for its held loop delivery
+  // and asserts a single call. Startup notifications are covered separately.
+  const hooks = await server({ directory: root, worktree: root, client: { session: { promptAsync } } }, { chatNotifications: false });
   let outcome: { kind: string; error?: unknown } | undefined;
   let closing: Promise<void> | undefined;
   try {

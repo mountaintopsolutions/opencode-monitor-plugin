@@ -64,8 +64,8 @@ function helper(extra: Record<string, unknown> = {}) {
   cleanup.push(async () => { runner.releaseAll(); await turns(); await dispose(plugin); });
   return { runner, registry, notify, plugin };
 }
-async function hooks(promptAsync = vi.fn(async () => ({})), directory = root) {
-  const result = await server({ directory, worktree: directory, client: { session: { promptAsync } } });
+async function hooks(promptAsync = vi.fn(async () => ({})), directory = root, pluginOptions?: Record<string, unknown>) {
+  const result = await server({ directory, worktree: directory, client: { session: { promptAsync } } }, pluginOptions);
   cleanup.push(() => result.__stop());
   await result.event({ event: { type: 'session.status', properties: { sessionID: 'owner', status: { type: 'idle' } } } });
   return { result, promptAsync };
@@ -92,7 +92,7 @@ describe('owned monitor lifecycle disposal', () => {
   });
 
   it('awaits every owned background and monitor close before resolving concurrent disposal', async () => {
-    vi.useFakeTimers(); const f = helper();
+    vi.useFakeTimers(); const f = helper({ chatNotifications: false });
     await f.plugin.handlers.background('ordinary fixture', context());
     await f.plugin.handlers.monitor('--regex MATCH --before 0 --after 1 --debounce 1 -- ordinary fixture', context());
     f.runner.output('bg_1'); f.runner.output('mon_2');
@@ -216,7 +216,9 @@ describe('owned monitor lifecycle disposal', () => {
 
   it('preserves a real harmless background result and one terminal state with one delivery', async () => {
     vi.mocked(statusStore.writeMonitorStatus).mockImplementation(originalWriteStatus);
-    const { result, promptAsync } = await hooks();
+    // chatNotifications off: this asserts exactly one delivery, the terminal
+    // result. The startup notification is a separate concern with its own test.
+    const { result, promptAsync } = await hooks(undefined, undefined, { chatNotifications: false });
     const nonce = 'monitor-disposal-positive-control';
     const response = await result.tool.opencode_monitor_background.execute({ command: `printf '${nonce}\\n'` }, toolContext());
     expect(response).toBe('started bg_1');
@@ -233,7 +235,7 @@ describe('owned monitor lifecycle disposal', () => {
     const script = join(root, 'child.cjs'), ready = join(root, 'ready'), term = join(root, 'term'), release = join(root, 'release');
     await writeFile(script, `const fs=require('fs');process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(term)},'term');const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){clearInterval(t);process.exit(0)}},5)});fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1000);`);
     const runner = new ProcessRunner(); const notify = vi.fn(async () => {});
-    const plugin = createMonitorPlugin({ runner, notify, health: async () => {}, statusScope: root });
+    const plugin = createMonitorPlugin({ runner, notify, health: async () => {}, statusScope: root, chatNotifications: false });
     await plugin.handlers.background(`exec '${process.execPath.replaceAll("'", "'\\''")}' '${script.replaceAll("'", "'\\''")}'`, context());
     let cancelled: Promise<unknown> | undefined;
     cleanup.push(async () => { await writeFile(release, 'release'); if (cancelled) await cancelled; else await runner.cancel('bg_1').catch(() => {}); await dispose(plugin); });

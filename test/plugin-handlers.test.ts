@@ -483,3 +483,31 @@ describe('plugin command handlers', () => {
     expect(jobs).not.toContain('mon_1');
   });
 });
+
+describe('chatNotifications startup delivery', () => {
+  it('delivers a startup notification by default and suppresses it when disabled', async () => {
+    const enabled: AutoSubmitRequest[] = [];
+    const enabledPlugin = createMonitorPlugin({
+      runner: new FakeRunner(),
+      health: async () => undefined,
+      notify: async (request) => { enabled.push(request); },
+    });
+
+    await enabledPlugin.handlers.background('echo one', userCtx('s1'));
+
+    expect(enabled.map((request) => request.jobID)).toEqual(['bg_1']);
+    expect(enabled[0]?.text).toContain('bg_1');
+
+    const disabled: AutoSubmitRequest[] = [];
+    const disabledPlugin = createMonitorPlugin({
+      runner: new FakeRunner(),
+      health: async () => undefined,
+      notify: async (request) => { disabled.push(request); },
+      chatNotifications: false,
+    });
+
+    await disabledPlugin.handlers.background('echo one', userCtx('s1'));
+
+    expect(disabled).toEqual([]);
+  });
+});
