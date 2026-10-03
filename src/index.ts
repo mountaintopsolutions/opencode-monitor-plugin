@@ -321,11 +321,11 @@ export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): Monit
         // Deliver a startup notification to the chat so there is a visible log
         // of when the job was spawned (not just the sidebar indicator).
         if (chatNotifications) {
-          void deliver({
+          track(pending, deliver({
             sessionID, agent, jobID, kind: 'bg',
             text: formatDelivery(`⚙ background ${jobID} started: ${parsed.command}`).text,
             submit: true,
-          }, true).catch((error) => monitorDebug('plugin.background.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) }));
+          }, true).catch((error) => monitorDebug('plugin.background.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) })));
         }
         trackExit(jobID, handle.exitPromise.then(async (code) => {
           monitorDebug('plugin.background.runner.exit', { jobID, sessionID, code });
@@ -412,8 +412,8 @@ export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): Monit
           onWindow: (window) => {
             monitorDebug('plugin.monitor.window', { jobID, sessionID, matchSeqs: window.matchSeqs, eventSeqs: window.events.map((event) => event.seq) });
             const formatted = formatDelivery(windowToText(window)).text;
-            void deliver({ sessionID, agent, jobID, kind: 'mon', text: formatted, submit: true }, true)
-              .catch((error) => failJob(jobID, error));
+            track(pending, deliver({ sessionID, agent, jobID, kind: 'mon', text: formatted, submit: true }, true)
+              .catch((error) => failJob(jobID, error)));
           },
         });
         outputHandler = (event: OutputEvent) => {
@@ -428,11 +428,11 @@ export function createMonitorPlugin(deps: MonitorPluginDependencies = {}): Monit
         monitorDebug('plugin.monitor.runner.started', { jobID, sessionID });
         // Deliver a startup notification to the chat.
         if (chatNotifications) {
-          void deliver({
+          track(pending, deliver({
             sessionID, agent, jobID, kind: 'mon',
             text: formatDelivery(`⚙ monitor ${jobID} started: ${parsed.command}`).text,
             submit: true,
-          }, true).catch((error) => monitorDebug('plugin.monitor.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) }));
+          }, true).catch((error) => monitorDebug('plugin.monitor.start.deliver.failed', { jobID, error: error instanceof Error ? error.message : String(error) })));
         }
         trackExit(jobID, handle.exitPromise.then((code) => {
           monitorDebug('plugin.monitor.runner.exit', { jobID, sessionID, code });
