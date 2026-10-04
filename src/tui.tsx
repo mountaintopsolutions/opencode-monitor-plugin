@@ -357,17 +357,13 @@ export const setup = async (context: V2TuiContext): Promise<() => void> => {
   const { jobs, snapshot, stop } = useV2MonitorData(scopePath);
   monitorDebug('tui.v2.init', { scope: scopePath, display });
 
-  // v2's ResolvedTheme is not the v1 TuiPluginApi theme, so tokens are read
-  // defensively: a missing token renders uncoloured rather than throwing.
-  const th = () => (context.theme ?? {}) as Theme;
-  const animate = () => context.options?.animations !== false;
-
-  const Dot = (props: { color?: Color }) =>
-    animate() ? (
-      <spinner frames={SPINNER_FRAMES} interval={80} color={props.color} />
-    ) : (
-      <text fg={props.color} flexShrink={0}>●</text>
-    );
+  // v2's plugin context carries no theme: the host reads its own theme through a
+  // hook, so every token here would be `undefined`. OpenTUI 0.5 (the version v2
+  // runs) throws while rendering a `fg`/`style.fg`/`spinner color` of undefined,
+  // and the throw takes the whole TUI render down — the screen blanks the moment
+  // a job turns active. So the v2 indicator renders unstyled text: no colour
+  // props at all, and a static glyph instead of the host's <spinner>.
+  const badgeText = (deliveryStatus: string) => deliveryBadge(deliveryStatus, {} as Theme).text;
 
   // Mirrors the v1 Detail view: header counts, then one line per job in the
   // scope (including subagent-spawned ones, per the scope-wide jobs feature).
@@ -379,48 +375,36 @@ export const setup = async (context: V2TuiContext): Promise<() => void> => {
     const snap = () => snapshot();
     const activeCount = createMemo(() => all().filter((job) => job.status === 'active').length);
     return (
-      <Show when={all().length > 0} fallback={<text fg={th().textMuted}>○ jobs idle</text>}>
+      <Show when={all().length > 0} fallback={<text>○ jobs idle</text>}>
         <box>
           <box flexDirection="row" gap={1}>
-            <Show when={activeCount() > 0} fallback={<text fg={th().textMuted}>●</text>}>
-              <Dot color={th().warning} />
-            </Show>
-            <text fg={th().text}>
+            <text flexShrink={0}>●</text>
+            <text>
               <b>OpenCode jobs</b>{' '}
-              <span style={{ fg: th().textMuted }}>
-                {activeCount() > 0 ? <span style={{ fg: th().warning }}>{activeCount()} active</span> : null}
-                {(snap()?.queueDepth ?? 0) > 0 ? ' · ' : null}
-                {(snap()?.queueDepth ?? 0) > 0 ? <span style={{ fg: th().info }}>{snap()!.queueDepth} queued</span> : null}
-                {(snap()?.completedCount ?? 0) > 0 ? ' · ' : null}
-                {(snap()?.completedCount ?? 0) > 0 ? <span style={{ fg: th().success }}>{snap()!.completedCount} done</span> : null}
-                {(snap()?.failedCount ?? 0) > 0 ? ' · ' : null}
-                {(snap()?.failedCount ?? 0) > 0 ? <span style={{ fg: th().error }}>{snap()!.failedCount} failed</span> : null}
-              </span>
+              {activeCount() > 0 ? <span>{activeCount()} active</span> : null}
+              {(snap()?.queueDepth ?? 0) > 0 ? ' · ' : null}
+              {(snap()?.queueDepth ?? 0) > 0 ? <span>{snap()!.queueDepth} queued</span> : null}
+              {(snap()?.completedCount ?? 0) > 0 ? ' · ' : null}
+              {(snap()?.completedCount ?? 0) > 0 ? <span>{snap()!.completedCount} done</span> : null}
+              {(snap()?.failedCount ?? 0) > 0 ? ' · ' : null}
+              {(snap()?.failedCount ?? 0) > 0 ? <span>{snap()!.failedCount} failed</span> : null}
             </text>
           </box>
           <For each={all()}>
-            {(job: MonitorIndicatorJob) => {
-              const badge = deliveryBadge(job.deliveryStatus, th());
-              return (
-                <box flexDirection="row" gap={1}>
-                  <Show
-                    when={job.status === 'active'}
-                    fallback={<text fg={kindColor(th(), job.kind)} flexShrink={0}>●</text>}
-                  >
-                    <Dot color={kindColor(th(), job.kind)} />
-                  </Show>
-                  <text fg={th().text} wrapMode="none">
-                    <b>{job.jobID}</b>{' '}
-                    <span style={{ fg: kindColor(th(), job.kind) }}>{title(job.kind)}</span>{' '}
-                    <span style={{ fg: statusColor(th(), job.status) }}>{statusLabel(job.status)}</span>{' '}
-                    <span style={{ fg: th().textMuted }}>{formatElapsed(Date.now() - (job.createdAt || Date.now()))}</span>{' '}
-                    <span style={{ fg: badge.color }}>{badge.text}</span>
-                  </text>
-                </box>
-              );
-            }}
+            {(job: MonitorIndicatorJob) => (
+              <box flexDirection="row" gap={1}>
+                <text flexShrink={0}>{job.status === 'active' ? '●' : '○'}</text>
+                <text wrapMode="none">
+                  <b>{job.jobID}</b>{' '}
+                  <span>{title(job.kind)}</span>{' '}
+                  <span>{statusLabel(job.status)}</span>{' '}
+                  <span>{formatElapsed(Date.now() - (job.createdAt || Date.now()))}</span>{' '}
+                  <span>{badgeText(job.deliveryStatus)}</span>
+                </text>
+              </box>
+            )}
           </For>
-          <text fg={th().textMuted}>/cancel to stop</text>
+          <text>/cancel to stop</text>
         </box>
       </Show>
     );
@@ -433,29 +417,29 @@ export const setup = async (context: V2TuiContext): Promise<() => void> => {
     const badgeCounts = createMemo(() => counts(all()));
     const elapsed = createMemo(() => maxElapsed(all()));
     return (
-      <Show when={all().length > 0} fallback={<text fg={th().textMuted}>○ jobs idle</text>}>
+      <Show when={all().length > 0} fallback={<text>○ jobs idle</text>}>
         <box flexDirection="row" gap={1}>
-          <Dot color={th().warning} />
+          <text flexShrink={0}>●</text>
           <text>
             <For each={badgeCounts()}>
               {(item, i) => (
                 <>
                   <Show when={i() > 0}>
-                    <span style={{ fg: th().textMuted }}> · </span>
+                    <span> · </span>
                   </Show>
-                  <span style={{ fg: kindColor(th(), item.kind) }}>{item.kind}×{item.count}</span>
+                  <span>{item.kind}×{item.count}</span>
                 </>
               )}
             </For>
           </text>
           <Show when={elapsed() > 0}>
-            <text fg={th().textMuted}>⏱{formatElapsed(elapsed())}</text>
+            <text>⏱{formatElapsed(elapsed())}</text>
           </Show>
           <Show when={(snap()?.queueDepth ?? 0) > 0}>
-            <text fg={th().info}>␐{snap()!.queueDepth}</text>
+            <text>␐{snap()!.queueDepth}</text>
           </Show>
           <Show when={snap()?.bridgeUp === false}>
-            <text fg={th().error}>⚡bridge↓</text>
+            <text>⚡bridge↓</text>
           </Show>
         </box>
       </Show>
@@ -472,7 +456,7 @@ export const setup = async (context: V2TuiContext): Promise<() => void> => {
     render: () => {
       const active = jobs().filter((job) => job.status === 'active').length;
       if (active === 0) return null;
-      return <text fg={th().textMuted}>{active} running</text>;
+      return <text>{active} running</text>;
     },
   });
 

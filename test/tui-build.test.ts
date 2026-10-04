@@ -28,4 +28,17 @@ describe('tui build output', () => {
     expect(typeof mod.default.tui).toBe('function')
     expect(typeof mod.tui).toBe('function')
   })
+
+  // v2's TUI context has no theme, so any colour the v2 half passes is
+  // `undefined`. OpenTUI 0.5 throws on that while rendering the job rows and
+  // the throw takes the whole TUI down: the screen blanks as soon as a job is
+  // active. The v2 half must therefore emit no colour props at all.
+  it('v2 setup renders without colour props', async () => {
+    const code = readFileSync(distTui, 'utf8')
+    const v2 = code.slice(code.indexOf('const v2Scope'))
+    expect(v2.length).toBeGreaterThan(0)
+    expect(v2).not.toMatch(/\bfg:\s*/)
+    expect(v2).not.toMatch(/style:\s*\{\s*fg/)
+    expect(v2).not.toMatch(/"spinner"/)
+  })
 })

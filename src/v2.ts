@@ -24,8 +24,9 @@
 //   commands  mutate config.command      -> ctx.command.transform(editor.add)
 //                                            CommandInvocation = { sessionID, prompt, delivery }
 //                                            submitted with ctx.session.prompt
-//   events    an `event` hook            -> ctx.event.subscribe() async iterable
-//   delivery  client.session.promptAsync -> ctx.session.synthetic
+//   events    an `event` hook            -> unusable (Effect Stream, see below)
+//   delivery  client.session.promptAsync -> ctx.session.synthetic, gated on
+//                                            ctx.session.wait
 //
 // Parsers, registry, runner, monitor engine, idle queue and bridge are shared
 // with v1 unchanged.
@@ -37,6 +38,9 @@
 
 export const PLUGIN_ID = 'opencode-monitor';
 
+import { randomUUID } from 'node:crypto';
+import { monitorDebug } from './debug-log.js';
+
 type V1Factory = (input: any, options?: Record<string, unknown>) => Promise<any>;
 
 export interface V2Ctx {
@@ -44,16 +48,20 @@ export interface V2Ctx {
   options: Record<string, unknown>;
   session: {
     prompt(input: any): Promise<unknown>;
+    /** v2 body: { id?, text, description?, metadata?, delivery?, resume? }. */
     synthetic(input: {
       sessionID: string;
       text: string;
+      id?: string;
+      description?: string;
       metadata?: Record<string, unknown>;
+      delivery?: unknown;
       agent?: string;
     }): Promise<unknown>;
   };
   tool: { transform(cb: (editor: any) => void): Promise<unknown> };
   command: { transform(cb: (editor: any) => void): Promise<unknown> };
-  event: { subscribe(options?: { signal?: AbortSignal }): AsyncIterable<any> };
+  event?: unknown;
 }
 
 /** v2 Tool.Context, narrowed to what this plugin reads. */
@@ -137,6 +145,34 @@ const COMMAND_BODIES: Record<string, string> = {
 };
 
 /**
+ * Block until v2 reports the session idle, so a job notification is never
+ * injected into a turn that is still running.
+ *
+ * v2 gives the plugin no usable session-status feed: `ctx.event.subscribe()`
+ * returns an Effect Stream, not an async iterable, so the old `for await` loop
+ * threw on its first tick and was swallowed by its own catch. The idle queue
+ * therefore believed a session was free 1.5s after our own tool returned — a
+ * guess made while the agent's turn was still streaming.
+ *
+ * `session.wait` is the server's own idle signal (`POST
+ * /api/experimental/session/:id/wait`, 204 when idle), so ask it instead of
+ * guessing. Returns false when the host exposes no such call, which holds the
+ * delivery rather than injecting it into a possibly-busy session.
+ */
+async function waitForIdleSession(ctx: V2Ctx, sessionID: unknown): Promise<boolean> {
+  const wait = (ctx.session as { wait?: (input: { sessionID: string }) => Promise<unknown> }).wait;
+  if (typeof sessionID !== 'string' || typeof wait !== 'function') return false;
+  try {
+    await wait({ sessionID });
+    return true;
+  } catch (error) {
+    // 404: session is gone. 503: wait unsupported. Either way, do not inject.
+    monitorDebug('v2.wait.error', { sessionID, error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
+/**
  * Instantiate the v1 plugin with delivery routed through v2's synthetic prompt
  * API instead of the v1 client.
  *
@@ -154,9 +190,20 @@ async function createForV2(ctx: V2Ctx, server: V1Factory) {
       client: {
         session: {
           promptAsync: async (options: any) => {
+            const sessionID = options?.path?.id;
+            if (!(await waitForIdleSession(ctx, sessionID))) {
+              monitorDebug('v2.deliver.skipped', { sessionID, reason: 'session has no idle signal' });
+              return {};
+            }
             const part = options?.body?.parts?.[0];
             await ctx.session.synthetic({
-              sessionID: options?.path?.id,
+              sessionID,
+              // v2's /synthetic endpoint validates `id` as a message id
+              // ("Expected a string starting with msg_ at [id]"). v1's
+              // prompt_async minted one server-side, so the v1 shim never had
+              // one to pass — under v2 every job notification 400s and the
+              // result is silently lost.
+              id: `msg_${randomUUID().replace(/-/g, '')}`,
               text: part?.text ?? '',
               metadata: { ...(part?.metadata ?? {}) },
               ...(options?.body?.agent ? { agent: options.body.agent } : {}),
@@ -229,21 +276,13 @@ export function createSetup(server: V1Factory) {
       }
     });
 
-    // v2 has no per-event hook; consume the stream and stop on cleanup.
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          await instance.event?.({ event });
-        }
-      } catch {
-        // The stream ends when the signal aborts; a transport error during
-        // shutdown must not surface as an unhandled rejection.
-      }
-    })();
+    // v2's `ctx.event.subscribe()` returns an Effect Stream, not an async
+    // iterable, so it cannot be consumed without depending on Effect. Nothing
+    // is wired here on purpose: every delivery path now asks `session.wait`
+    // for idle directly (see waitForIdleSession), so the plugin does not need a
+    // session-status feed to decide when it is safe to inject.
 
     return async () => {
-      controller.abort();
       await instance.dispose?.();
     };
   };
