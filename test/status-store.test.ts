@@ -19,7 +19,7 @@ describe('monitor status store', () => {
     vi.unstubAllEnvs();
   });
 
-  it('uses a stable scoped runtime path', async () => {
+  it('uses a stable scoped runtime path that ignores XDG_RUNTIME_DIR', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'opencode-monitor-status-'));
     vi.stubEnv('XDG_RUNTIME_DIR', dir);
 
@@ -29,7 +29,22 @@ describe('monitor status store', () => {
 
     expect(one).toBe(two);
     expect(one).not.toBe(other);
-    expect(one).toContain(join(dir, 'opencode-monitor', 'status'));
+
+    // The plugin server and, under v2, the terminal client are separate
+    // processes that do not share an environment. Deriving this path from
+    // XDG_RUNTIME_DIR made them disagree whenever only one had it set, so the
+    // indicator silently read a file that was never written. The path must
+    // therefore come from os.tmpdir() regardless of the environment.
+    expect(one).not.toContain(dir);
+    expect(one).toContain(join(tmpdir(), 'opencode-monitor', 'status'));
+  });
+
+  it('resolves the same status path whether or not XDG_RUNTIME_DIR is set', () => {
+    vi.stubEnv('XDG_RUNTIME_DIR', '/run/user/1000');
+    const withRuntimeDir = monitorStatusPath('/tmp/project-a');
+    vi.stubEnv('XDG_RUNTIME_DIR', '');
+    const withoutRuntimeDir = monitorStatusPath('/tmp/project-a');
+    expect(withRuntimeDir).toBe(withoutRuntimeDir);
   });
 
   it('normalizes equivalent scope paths before hashing', () => {

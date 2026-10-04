@@ -75,13 +75,23 @@ describe('opencode monitor plugin integration', () => {
 
     await plugin.handlers.background('echo hi', userCtx('s1'));
     runner.exits.get('bg_1')?.(0);
-    await vi.waitFor(() => expect(runner.disposed).toContain('bg_1'));
+    // runner.disposed is set in the exit chain's finally, which sits behind
+    // `await deliver(...)` — a real HTTP round-trip to the bridge. The 1s
+    // vi.waitFor default is too tight for that under parallel suite load.
+    await vi.waitFor(() => expect(runner.disposed).toContain('bg_1'), { timeout: 3000 });
     expect(delivered).toEqual([]);
 
     server.setSessionStatus('s1', 'idle');
-    await vi.waitFor(() => expect(delivered).toHaveLength(1));
-    expect(delivered[0].params.text).toContain('background bg_1 exited');
-    expect(delivered[0].params.text).toContain('full output');
+    // IdleQueue.flush is synchronous, but a delivery's POST may not have reached
+    // the bridge yet, in which case it flushes on a later poll.
+    await vi.waitFor(() => expect(delivered).toHaveLength(2), { timeout: 3000 });
+    // Order is not asserted. The spawn notification is fired as a void
+    // deliver(), so its POST races the terminal result's and the queue can hand
+    // them to the bridge in either order. Assert the set, not the sequence.
+    const texts = delivered.map((entry) => entry.params.text);
+    expect(texts.some((text) => text.includes('⚙ background bg_1 started'))).toBe(true);
+    expect(texts.some((text) => text.includes('⚙↩ background bg_1 exited'))).toBe(true);
+    expect(texts.some((text) => text.includes('full output'))).toBe(true);
   });
 
   it('monitor match queues until idle and duplicate seqs are not resent', async () => {
@@ -104,12 +114,12 @@ describe('opencode monitor plugin integration', () => {
     expect(delivered).toEqual([]);
 
     server.setSessionStatus('s1', 'idle');
-    await vi.waitFor(() => expect(delivered).toHaveLength(1));
+    await vi.waitFor(() => expect(delivered).toHaveLength(2));
     for (const handler of runner.outputHandlers) {
       handler({ jobID: 'mon_1', seq: 1, stream: 'stdout', line: 'ERR one again', timestamp: Date.now() });
     }
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(delivered).toHaveLength(1);
+    expect(delivered).toHaveLength(2);
   });
 
   it('coalesces loop backlog into one idle delivery with tick count metadata', async () => {
@@ -161,7 +171,7 @@ describe('opencode monitor plugin integration', () => {
     scheduler.destroy();
   });
 
-  it('cross-session jobs and cancel are isolated', async () => {
+  it('cross-session cancel is isolated but jobs list shows all scope jobs', async () => {
     const runner = new FakeRunner();
     const plugin = createMonitorPlugin({ runner, health: async () => undefined });
 
@@ -171,7 +181,7 @@ describe('opencode monitor plugin integration', () => {
     await expect(plugin.handlers.cancel('bg_1', userCtx('s2'))).rejects.toThrow(/another session/);
     const s1Jobs = await plugin.handlers.jobs('', userCtx('s1'));
     expect(s1Jobs).toContain('bg_1');
-    expect(s1Jobs).not.toContain('bg_2');
+    expect(s1Jobs).toContain('bg_2');
   });
 
   it('queue overflow increments dropped counter', () => {

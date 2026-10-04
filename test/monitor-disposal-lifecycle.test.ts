@@ -109,7 +109,10 @@ describe('owned monitor lifecycle disposal', () => {
     expect(f.runner.listenerCount('output')).toBe(0);
     const calls = f.notify.mock.calls.length;
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(f.notify).toHaveBeenCalledTimes(calls); expect(calls).toBe(0);
+    expect(f.notify).toHaveBeenCalledTimes(calls);
+    // Both jobs announced themselves when they spawned. Cancellation then adds
+    // no further delivery, and disposal adds none either.
+    expect(calls).toBe(2);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -209,23 +212,45 @@ describe('owned monitor lifecycle disposal', () => {
     const { result, promptAsync } = await hooks();
     await result.tool.opencode_monitor_background.execute({ command: "printf 'ordered-status-fixture\\n'" }, toolContext());
     await result.event({ event: { type: 'session.idle', properties: { sessionID: 'owner' } } });
-    await vi.waitFor(() => expect(promptAsync).toHaveBeenCalledTimes(1), { timeout: 3000 });
-    gate.resolve(); await firstCommitted.promise; await dispose(result);
+    // Wait for the terminal result specifically, not merely any delivery. A
+    // background job also emits a spawn notification, and that one can arrive
+    // first — waiting on "some call" let dispose() race the job's completion and
+    // failed the completedCount assertion below. The terminal delivery is the
+    // sync point this test actually needs.
+    await vi.waitFor(
+      () => expect(promptAsync.mock.calls.some((call) => String(call[0].body.parts[0].text).includes('exited'))).toBe(true),
+      { timeout: 3000 },
+    );
+    gate.resolve(); await firstCommitted.promise;
+    // registry.complete runs just after the terminal delivery, so settle it
+    // before disposing rather than relying on the delivery having been observed.
+    await vi.waitFor(() => expect(statusStore.readMonitorStatus(root).completedCount).toBe(1), { timeout: 3000 });
+    await dispose(result);
     expect(statusStore.readMonitorStatus(root)).toMatchObject({ completedCount: 1, jobs: [], bridgeUp: false, scheduledPending: 0 });
   });
 
-  it('preserves a real harmless background result and one terminal state with one delivery', async () => {
+  it('preserves a real harmless background result and one terminal state across both deliveries', async () => {
     vi.mocked(statusStore.writeMonitorStatus).mockImplementation(originalWriteStatus);
     const { result, promptAsync } = await hooks();
     const nonce = 'monitor-disposal-positive-control';
     const response = await result.tool.opencode_monitor_background.execute({ command: `printf '${nonce}\\n'` }, toolContext());
     expect(response).toBe('started bg_1');
-    await vi.waitFor(() => expect(promptAsync).toHaveBeenCalledTimes(1), { timeout: 3000 });
-    expect(promptAsync.mock.calls[0]?.[0]).toMatchObject({ path: { id: 'owner' }, body: { parts: [{ metadata: { opencodeMonitorJobID: 'bg_1' } }] } });
+    // Two deliveries: the spawn announcement and the terminal result. The
+    // announcement is fired as a void deliver(), so its POST races the result's
+    // and either can land first — assert the set, not the sequence.
+    await vi.waitFor(() => expect(promptAsync).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    for (const call of promptAsync.mock.calls) {
+      expect(call[0]).toMatchObject({ path: { id: 'owner' }, body: { parts: [{ metadata: { opencodeMonitorJobID: 'bg_1' } }] } });
+    }
+    const texts = promptAsync.mock.calls.map((call) => String(call[0].body.parts[0].text));
+    expect(texts.some((text) => text.includes('⚙ background bg_1 started'))).toBe(true);
+    expect(texts.some((text) => text.includes('⚙↩ background bg_1 exited'))).toBe(true);
+    expect(texts.some((text) => text.includes(nonce))).toBe(true);
     expect(statusStore.writeMonitorStatus).toHaveBeenLastCalledWith(root, expect.objectContaining({ completedCount: 1 }));
     await vi.waitFor(() => expect(statusStore.readMonitorStatus(root).completedCount).toBe(1), { timeout: 3000 });
     await dispose(result); await new Promise(resolve => setTimeout(resolve, 50));
-    expect(promptAsync).toHaveBeenCalledTimes(1);
+    // Disposal adds no third delivery.
+    expect(promptAsync).toHaveBeenCalledTimes(2);
     expect(statusStore.readMonitorStatus(root).completedCount).toBe(1);
   });
 
@@ -245,6 +270,11 @@ describe('owned monitor lifecycle disposal', () => {
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(done).toBe(false); expect(() => process.kill(pid, 0)).not.toThrow();
     await writeFile(release, 'release'); await Promise.all([cancelled, closing]);
-    expect(() => process.kill(pid, 0)).toThrow(); expect(notify).not.toHaveBeenCalled();
+    expect(() => process.kill(pid, 0)).toThrow();
+    // Cancellation suppresses the terminal result but not the spawn notice, so
+    // exactly one delivery is expected and it is the announcement. Asserting the
+    // count and the content is what distinguishes "cancelled" from "silent".
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(String(notify.mock.calls[0]![0].text)).toContain('⚙ background bg_1 started');
   });
 });

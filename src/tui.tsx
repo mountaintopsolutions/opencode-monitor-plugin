@@ -4,11 +4,10 @@ import { createMemo, createSignal, For, Show, onCleanup } from 'solid-js';
 import { readMonitorStatus, readMonitorTail, type MonitorIndicatorJob, type MonitorIndicatorSnapshot, type MonitorTailLine } from './status-store.js';
 import { monitorDebug } from './debug-log.js';
 
-// The host (och) registers <spinner> via opentui-spinner at TUI startup.
-// We do not import opentui-spinner here because it lives in the top-level
-// node_modules while @opentui/solid is nested in the plugin's node_modules,
-// causing a cross-module resolution failure. The <spinner> intrinsic is
-// always available because the host registers it before loading plugins.
+// The host (opencode) registers <spinner> via opentui-spinner at TUI startup and
+// injects its shared @opentui/solid runtime into plugins, so the <spinner>
+// intrinsic resolves without importing opentui-spinner as a direct dependency.
+// The host registers it before loading plugins.
 
 declare global {
   namespace JSX {
@@ -24,6 +23,13 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 
 type Theme = TuiPluginApi['theme']['current'];
 type Color = Theme['text'];
+
+type DisplayMode = 'compact' | 'detailed';
+
+function readDisplayMode(options: Record<string, unknown> | undefined): DisplayMode {
+  const raw = options?.mode ?? options?.display;
+  return raw === 'compact' ? 'compact' : 'detailed';
+}
 
 function scope(api: TuiPluginApi): string {
   return api.state.path.worktree || api.state.path.directory || process.cwd();
@@ -112,8 +118,8 @@ function useMonitorData(api: TuiPluginApi, sessionID?: string) {
   let lastLog = '';
   const refresh = () => {
     const snap = readMonitorStatus(scope(api));
-    const sessionJobs = sessionID ? snap.jobs.filter((job) => job.sessionID === sessionID) : [];
-    const visibleJobs = sessionJobs.length > 0 ? sessionJobs : snap.jobs;
+    // Show all jobs in the scope (worktree/folder), including subagent-spawned ones.
+    const visibleJobs = snap.jobs;
     setJobs(visibleJobs);
     setSnapshot(snap);
     const nextLog = JSON.stringify({ scope: scope(api), sessionID, snapshotJobs: snap.jobs.length, visibleJobs: visibleJobs.length });
@@ -272,8 +278,9 @@ function Detail(props: { api: TuiPluginApi; session_id?: string }) {
   );
 }
 
-export const tui: TuiPlugin = async (api, _options, _meta) => {
-  monitorDebug('tui.init', { scope: scope(api) });
+export const tui: TuiPlugin = async (api, options, _meta) => {
+  const display = readDisplayMode(options);
+  monitorDebug('tui.init', { scope: scope(api), display });
   api.slots.register({
     order: 10_000,
     slots: {
@@ -288,13 +295,179 @@ export const tui: TuiPlugin = async (api, _options, _meta) => {
         );
       },
       sidebar_content(_ctx, props) {
-        return <Detail api={api} session_id={props.session_id} />;
-      },
-      sidebar_footer(_ctx, props) {
-        return <Compact api={api} session_id={props.session_id} />;
+        return display === 'compact'
+          ? <Compact api={api} session_id={props.session_id} />
+          : <Detail api={api} session_id={props.session_id} />;
       },
     },
   });
 };
 
-export default { id, tui };
+/**
+ * OpenCode v2 terminal-client setup.
+ *
+ * v2 moved TUI plugins from `api.slots.register({ slots: { sidebar_title,
+ * sidebar_content } })` to `context.ui.slot({ append: <path>, render })` with
+ * dot-separated slot paths. The v1 `tui` export above is unchanged and remains
+ * the v1 entrypoint; this is the v2 half of the same dual shape.
+ *
+ * This module keeps compiling against the @opentui/solid version already in
+ * package.json so the v1 precompiled build is not broken; the v2 host supplies
+ * the runtime. The OpenTUI major-version tension is recorded in
+ * fork-changelog.md as an open risk.
+ */
+type V2TuiContext = {
+  location?: { directory?: string };
+  options?: Record<string, unknown>;
+  theme?: Partial<Theme>;
+  data: { location: { default(): string } };
+  ui: {
+    slot(claim: { append: string; render: (input: any) => unknown }): () => void;
+  };
+};
+
+function v2Scope(context: V2TuiContext): string {
+  return context.location?.directory || context.data.location.default() || process.cwd();
+}
+
+/**
+ * Poll the status file once a second.
+ *
+ * Signals and the interval are created in setup() rather than inside render():
+ * Solid's onCleanup is unavailable outside a reactive root, and slot render
+ * functions are not guaranteed to run in one. Owning the timer here also means
+ * the returned cleanup is the only place that stops it.
+ */
+function useV2MonitorData(scopePath: string) {
+  const [jobs, setJobs] = createSignal<MonitorIndicatorJob[]>([]);
+  const [snapshot, setSnapshot] = createSignal<MonitorIndicatorSnapshot | null>(null);
+  const refresh = () => {
+    const snap = readMonitorStatus(scopePath);
+    setJobs(snap.jobs);
+    setSnapshot(snap);
+  };
+  refresh();
+  const timer = setInterval(refresh, 1000);
+  return { jobs, snapshot, stop: () => clearInterval(timer) };
+}
+
+export const setup = async (context: V2TuiContext): Promise<() => void> => {
+  const display = readDisplayMode(context.options);
+  const scopePath = v2Scope(context);
+  const { jobs, snapshot, stop } = useV2MonitorData(scopePath);
+  monitorDebug('tui.v2.init', { scope: scopePath, display });
+
+  // v2's plugin context carries no theme: the host reads its own theme through a
+  // hook, so every token here would be `undefined`. OpenTUI 0.5 (the version v2
+  // runs) throws while rendering a `fg`/`style.fg`/`spinner color` of undefined,
+  // and the throw takes the whole TUI render down — the screen blanks the moment
+  // a job turns active. So the v2 indicator renders unstyled text: no colour
+  // props at all, and a static glyph instead of the host's <spinner>.
+  const badgeText = (deliveryStatus: string) => deliveryBadge(deliveryStatus, {} as Theme).text;
+
+  // Mirrors the v1 Detail view: header counts, then one line per job in the
+  // scope (including subagent-spawned ones, per the scope-wide jobs feature).
+  const Detail = () => {
+    // Accessors, not bare reads: a Solid component body runs once, so
+    // `const all = jobs()` would freeze whatever was there at creation and the
+    // sidebar would sit on "jobs idle" while the footer counted live jobs.
+    const all = () => jobs();
+    const snap = () => snapshot();
+    const activeCount = createMemo(() => all().filter((job) => job.status === 'active').length);
+    return (
+      <Show when={all().length > 0} fallback={<text>○ jobs idle</text>}>
+        <box>
+          <box flexDirection="row" gap={1}>
+            <text flexShrink={0}>●</text>
+            <text>
+              <b>OpenCode jobs</b>{' '}
+              {activeCount() > 0 ? <span>{activeCount()} active</span> : null}
+              {(snap()?.queueDepth ?? 0) > 0 ? ' · ' : null}
+              {(snap()?.queueDepth ?? 0) > 0 ? <span>{snap()!.queueDepth} queued</span> : null}
+              {(snap()?.completedCount ?? 0) > 0 ? ' · ' : null}
+              {(snap()?.completedCount ?? 0) > 0 ? <span>{snap()!.completedCount} done</span> : null}
+              {(snap()?.failedCount ?? 0) > 0 ? ' · ' : null}
+              {(snap()?.failedCount ?? 0) > 0 ? <span>{snap()!.failedCount} failed</span> : null}
+            </text>
+          </box>
+          <For each={all()}>
+            {(job: MonitorIndicatorJob) => (
+              <box flexDirection="row" gap={1}>
+                <text flexShrink={0}>{job.status === 'active' ? '●' : '○'}</text>
+                <text wrapMode="none">
+                  <b>{job.jobID}</b>{' '}
+                  <span>{title(job.kind)}</span>{' '}
+                  <span>{statusLabel(job.status)}</span>{' '}
+                  <span>{formatElapsed(Date.now() - (job.createdAt || Date.now()))}</span>{' '}
+                  <span>{badgeText(job.deliveryStatus)}</span>
+                </text>
+              </box>
+            )}
+          </For>
+          <text>/cancel to stop</text>
+        </box>
+      </Show>
+    );
+  };
+
+  // Mirrors the v1 Compact view: per-kind counts, elapsed, queue depth, bridge.
+  const Compact = () => {
+    const all = () => jobs();
+    const snap = () => snapshot();
+    const badgeCounts = createMemo(() => counts(all()));
+    const elapsed = createMemo(() => maxElapsed(all()));
+    return (
+      <Show when={all().length > 0} fallback={<text>○ jobs idle</text>}>
+        <box flexDirection="row" gap={1}>
+          <text flexShrink={0}>●</text>
+          <text>
+            <For each={badgeCounts()}>
+              {(item, i) => (
+                <>
+                  <Show when={i() > 0}>
+                    <span> · </span>
+                  </Show>
+                  <span>{item.kind}×{item.count}</span>
+                </>
+              )}
+            </For>
+          </text>
+          <Show when={elapsed() > 0}>
+            <text>⏱{formatElapsed(elapsed())}</text>
+          </Show>
+          <Show when={(snap()?.queueDepth ?? 0) > 0}>
+            <text>␐{snap()!.queueDepth}</text>
+          </Show>
+          <Show when={snap()?.bridgeUp === false}>
+            <text>⚡bridge↓</text>
+          </Show>
+        </box>
+      </Show>
+    );
+  };
+
+  const unregisterSidebar = context.ui.slot({
+    append: 'sidebar.content',
+    render: () => (display === 'compact' ? <Compact /> : <Detail />),
+  });
+
+  const unregisterFooter = context.ui.slot({
+    append: 'prompt.footer.status',
+    render: () => {
+      const active = jobs().filter((job) => job.status === 'active').length;
+      if (active === 0) return null;
+      return <text>{active} running</text>;
+    },
+  });
+
+  return () => {
+    stop();
+    unregisterSidebar();
+    unregisterFooter();
+  };
+};
+
+
+// Single default export satisfying both TUI loaders: v1 reads `tui`, v2 reads
+// `id` + `setup`. Mirrors the server entry's dual shape.
+export default { id, tui, setup };

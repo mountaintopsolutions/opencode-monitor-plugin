@@ -62,8 +62,8 @@ function userCtx(sessionID = 's1'): PluginContext {
   return { sessionID, invocationOrigin: 'user', registerSlashCommand: vi.fn() };
 }
 
-function promptAsyncRequest(promptAsync: ReturnType<typeof vi.fn>): any {
-  return promptAsync.mock.calls[0]?.[0];
+function promptAsyncRequest(promptAsync: ReturnType<typeof vi.fn>, callIndex = 0): any {
+  return promptAsync.mock.calls[callIndex]?.[0];
 }
 
 describe('plugin command handlers', () => {
@@ -114,11 +114,17 @@ describe('plugin command handlers', () => {
 
     expect(result).toContain('started bg_1');
     await vi.waitFor(() => expect(promptAsync).toHaveBeenCalled(), { timeout: 3_000 });
-    const request = promptAsyncRequest(promptAsync);
-    expect(request.path.id).toBe('s1');
-    expect(request.body.agent).toBe('operator');
-    expect(request.body.parts[0]).toMatchObject({ type: 'text', synthetic: true, metadata: { opencodeMcpVisible: true, opencodeMonitorJobID: 'bg_1' } });
-    expect(request.body.parts[0].text).toContain('[stdout] ok');
+    // First call is the startup notification
+    const startRequest = promptAsyncRequest(promptAsync, 0);
+    expect(startRequest.path.id).toBe('s1');
+    expect(startRequest.body.agent).toBe('operator');
+    expect(startRequest.body.parts[0]).toMatchObject({ type: 'text', synthetic: true, metadata: { opencodeMcpVisible: true, opencodeMonitorJobID: 'bg_1' } });
+    expect(startRequest.body.parts[0].text).toContain('⚙ background bg_1 started');
+    // The exit delivery arrives later — find it among the calls
+    await vi.waitFor(() => {
+      const exitReq = promptAsync.mock.calls.find((c: any[]) => c[0]?.body?.parts?.[0]?.text?.includes('[stdout] ok'));
+      expect(exitReq).toBeTruthy();
+    }, { timeout: 3_000 });
     await hooks.__stop();
   });
 
@@ -343,7 +349,7 @@ describe('plugin command handlers', () => {
     expect(jobs).not.toContain('loop_1');
   });
 
-  it('/jobs is scoped by session', async () => {
+  it('/jobs shows all scope jobs including other sessions', async () => {
     const runner = new FakeRunner();
     const plugin = createMonitorPlugin({ health: async () => undefined, runner });
 
@@ -352,7 +358,7 @@ describe('plugin command handlers', () => {
 
     const s1Jobs = await plugin.handlers.jobs('', userCtx('s1'));
     expect(s1Jobs).toContain('bg_1');
-    expect(s1Jobs).not.toContain('bg_2');
+    expect(s1Jobs).toContain('bg_2');
   });
 
   it('/cancel rejects cross-session jobs', async () => {
@@ -416,10 +422,12 @@ describe('plugin command handlers', () => {
 
     await plugin.handlers.background('echo one', userCtx('s1'));
     runner.exits.get('bg_1')?.(0);
-    await vi.waitFor(() => expect(notified).toHaveLength(1));
+    await vi.waitFor(() => expect(notified).toHaveLength(2));
 
     expect(notified[0]).toMatchObject({ sessionID: 's1', jobID: 'bg_1', kind: 'bg', submit: true });
-    expect(notified[0].text).toContain('background bg_1 exited');
+    expect(notified[0].text).toContain('⚙ background bg_1 started');
+    expect(notified[1]).toMatchObject({ sessionID: 's1', jobID: 'bg_1', kind: 'bg', submit: true });
+    expect(notified[1].text).toContain('⚙↩ background bg_1 exited');
   });
 
   it('background startup failure does not leave an active job', async () => {
@@ -451,9 +459,11 @@ describe('plugin command handlers', () => {
       handler({ jobID: 'mon_1', seq: 1, stream: 'stdout', line: 'ERR happened', timestamp: Date.now() });
     }
     await vi.advanceTimersByTimeAsync(1_000);
-    await vi.waitFor(() => expect(notified).toHaveLength(1));
+    await vi.waitFor(() => expect(notified).toHaveLength(2));
     expect(notified[0]).toMatchObject({ sessionID: 's1', jobID: 'mon_1', kind: 'mon', submit: true });
-    expect(notified[0].text).toContain('ERR happened');
+    expect(notified[0].text).toContain('⚙ monitor mon_1 started');
+    expect(notified[1]).toMatchObject({ sessionID: 's1', jobID: 'mon_1', kind: 'mon', submit: true });
+    expect(notified[1].text).toContain('ERR happened');
 
     runner.exits.get('mon_1')?.(0);
     await vi.waitFor(() => expect(runner.outputHandlers.size).toBe(0));
@@ -471,5 +481,91 @@ describe('plugin command handlers', () => {
     expect(runner.outputHandlers.size).toBe(0);
     const jobs = await plugin.handlers.jobs('', userCtx('s1'));
     expect(jobs).not.toContain('mon_1');
+  });
+});
+
+describe('chatNotifications startup delivery', () => {
+  it('delivers a startup notification by default and suppresses it when disabled', async () => {
+    const enabled: AutoSubmitRequest[] = [];
+    const enabledPlugin = createMonitorPlugin({
+      runner: new FakeRunner(),
+      health: async () => undefined,
+      notify: async (request) => { enabled.push(request); },
+    });
+
+    await enabledPlugin.handlers.background('echo one', userCtx('s1'));
+
+    expect(enabled.map((request) => request.jobID)).toEqual(['bg_1']);
+    expect(enabled[0]?.text).toContain('bg_1');
+
+    const disabled: AutoSubmitRequest[] = [];
+    const disabledPlugin = createMonitorPlugin({
+      runner: new FakeRunner(),
+      health: async () => undefined,
+      notify: async (request) => { disabled.push(request); },
+      chatNotifications: false,
+    });
+
+    await disabledPlugin.handlers.background('echo one', userCtx('s1'));
+
+    expect(disabled).toEqual([]);
+  });
+});
+
+// Guards the dual-loader export shape. v1 requires an object with server();
+// v2 requires id + setup and resolves dist/server.js in preference to
+// dist/index.js. A regression in either half is invisible to the other
+// loader's test suite, and the v2 half silently failed once already when
+// src/server.ts re-exported only `server`.
+describe('dual v1/v2 export shape', () => {
+  it('default export carries id, setup and server', async () => {
+    const mod = await import('../src/index.js');
+    expect(typeof mod.default).toBe('object');
+    expect(mod.default.id).toBe('opencode-monitor');
+    expect(typeof mod.default.setup).toBe('function');
+    expect(typeof mod.default.server).toBe('function');
+    expect(mod.default.server).toBe(mod.server);
+  });
+
+  it('the v2 runtime entry re-exports the same default, not a bare server', async () => {
+    const index = await import('../src/index.js');
+    const entry = await import('../src/server.js');
+    expect(entry.default).toBe(index.default);
+    expect(typeof entry.default).toBe('object');
+    expect(typeof entry.default.setup).toBe('function');
+  });
+
+  it('the v2 setup registers all six tools and all six commands', async () => {
+    const mod = await import('../src/index.js');
+    const added: { tools: any[]; commands: any[] } = { tools: [], commands: [] };
+    const ctx = {
+      location: { directory: '/fixture' },
+      options: {},
+      session: { synthetic: async () => ({}) },
+      tool: { transform: async (cb: any) => cb({ add: (t: any) => added.tools.push(t) }) },
+      command: { transform: async (cb: any) => cb({ add: (c: any) => added.commands.push(c) }) },
+      event: { subscribe: () => ({ [Symbol.asyncIterator]: async function* () {} }) },
+    };
+    const cleanup = await mod.default.setup(ctx as any);
+    // Full v1 identifiers, registered without a namespace so the names the
+    // command templates hardcode cannot drift.
+    expect(added.tools.map((t) => t.name).sort()).toEqual([
+      'opencode_monitor_background',
+      'opencode_monitor_cancel',
+      'opencode_monitor_jobs',
+      'opencode_monitor_loop',
+      'opencode_monitor_monitor',
+      'opencode_monitor_schedule',
+    ]);
+    for (const tool of added.tools) {
+      expect(tool.input.type).toBe('object');
+      expect(tool.input.additionalProperties).toBe(false);
+      expect(tool.options?.namespace).toBeUndefined();
+      expect(typeof tool.execute).toBe('function');
+    }
+    expect(added.commands.map((c) => c.name).sort()).toEqual(
+      ['background', 'cancel', 'jobs', 'loop', 'monitor', 'schedule'],
+    );
+    await cleanup();
   });
 });

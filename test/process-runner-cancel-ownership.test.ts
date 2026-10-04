@@ -50,8 +50,13 @@ describe('captured process cancellation ownership', () => {
       cancelled = runner.cancel('owned');
       const result = await Promise.race([cancelled.then(() => 'closed'), realDelay(CANCEL_SIGKILL_TIMEOUT_MS + 700).then(() => 'still-open')]);
       expect(result).toBe('closed');
-      const stat = await readFile(`/proc/${ids!.child}/stat`, 'utf8').catch(() => 'missing');
-      expect(stat === 'missing' || /\) [ZX] /.test(stat)).toBe(true);
+      // Reaping the descendant is an eventual condition: cancel() resolving does
+      // not mean the child has finished dying, so a one-shot /proc read can
+      // catch it mid-teardown in state R/S. Poll for the terminal state.
+      await vi.waitFor(async () => {
+        const stat = await readFile(`/proc/${ids!.child}/stat`, 'utf8').catch(() => 'missing');
+        expect(stat === 'missing' || /\) [ZX] /.test(stat)).toBe(true);
+      }, { timeout: 3000 });
     } finally {
       if (ids) { try { process.kill(-ids.parent, 'SIGKILL'); } catch {} }
       else { await runner.cancel('owned').catch(() => {}); }

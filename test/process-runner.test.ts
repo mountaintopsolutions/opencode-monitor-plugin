@@ -205,7 +205,11 @@ describe('ProcessRunner', () => {
   it('tail cap respects rolling 200-line limit', async () => {
     const id = 'tail_roll';
     const lines = Array.from({ length: 250 }, (_, i) => String(i)).join('\n');
-    const { exitPromise } = runner.run(id, `echo '${lines.replace(/\n/g, "\\n")}'`);
+    // printf, not echo: bash's builtin echo leaves \n literal, so under
+    // /bin/sh -> bash this emitted one line and the cap assertions below saw a
+    // single element. printf interprets escapes per POSIX, so this is
+    // shell-independent (macOS /bin/sh is bash in POSIX mode, Linux is not).
+    const { exitPromise } = runner.run(id, `printf '${lines.replace(/\n/g, "\\n")}\\n'`);
     await exitPromise;
     const tail = runner.tail(id, 'stdout');
     expect(tail.length).toBeGreaterThanOrEqual(1);

@@ -68,14 +68,24 @@ function scopeHash(scope: string): string {
   return crypto.createHash('sha256').update(normalizeMonitorScope(scope)).digest('hex').slice(0, 16);
 }
 
+// Runtime state is written by the plugin server and read by the indicator. Under
+// OpenCode v2 those are separate processes (server vs terminal client) that do not
+// share an environment, so resolving this root from XDG_RUNTIME_DIR made the two
+// disagree whenever only one of them had it set — the reader then resolved a
+// different path, silently caught the missing file and rendered an empty
+// snapshot. Both sides now derive the same path from os.tmpdir() unconditionally.
+//
+// Under v1 both roles live in one process, so this is a no-op there.
+function runtimeRoot(): string {
+  return tmpdir();
+}
+
 export function monitorStatusPath(scope = process.cwd()): string {
-  const root = process.env.XDG_RUNTIME_DIR || tmpdir();
-  return join(root, 'opencode-monitor', 'status', `${scopeHash(scope)}.json`);
+  return join(runtimeRoot(), 'opencode-monitor', 'status', `${scopeHash(scope)}.json`);
 }
 
 export function monitorTailPath(scope: string, jobID: string): string {
-  const root = process.env.XDG_RUNTIME_DIR || tmpdir();
-  return join(root, 'opencode-monitor', 'tail', scopeHash(scope), `${jobID}.log`);
+  return join(runtimeRoot(), 'opencode-monitor', 'tail', scopeHash(scope), `${jobID}.log`);
 }
 
 export async function writeMonitorStatus(scope: string, snapshot: MonitorIndicatorSnapshot): Promise<void> {

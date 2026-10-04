@@ -4,14 +4,11 @@ OpenCode plugin for background automation jobs. It provides slash commands, AI-c
 
 ## Prerequisites
 
-This plugin requires **och** (OpenCode >= 1.17.11-RC1) with the OpenTUI 0.4.x plugin runtime. OpenTUI 0.4+ no longer Solid-transforms `.tsx` files under `node_modules`, so this package ships a precompiled `dist/tui.js` as the public TUI entry.
+- Node.js >= 22
+- OpenCode >= 1.17.11, using its built-in OpenTUI 0.4.x plugin runtime
+- No custom OpenCode build is required
 
-**Install och (Linux x64):**
-```bash
-curl -fsSL https://s3.casonatto.dev/shared/opencode-custom/install.sh | sh
-```
-
-**Full documentation:** https://s3.casonatto.dev/shared/opencode-custom/opencode-custom-hindsight-install.md
+OpenTUI 0.4+ no longer Solid-transforms `.tsx` files under `node_modules`, so this package ships a precompiled `dist/tui.js` as the public TUI entry. The OpenTUI runtime packages (`@opentui/core`, `@opentui/solid`, `solid-js`) are regular dependencies of this plugin, not optional peers.
 
 ## Capabilities
 
@@ -21,6 +18,7 @@ curl -fsSL https://s3.casonatto.dev/shared/opencode-custom/install.sh | sh
 - Run repeated prompt loops; missed ticks while the target session is busy coalesce into one delivery.
 - Queue all automatic deliveries until the target OpenCode session is idle.
 - Show active jobs in the OpenCode TUI sidebar/title/footer and prompt-side chip.
+- Announce each spawned `/background` and `/monitor` job in chat (toggleable, see [Configuration](#configuration)).
 - Cancel active jobs by job ID.
 - Keep v1 state in-memory only; no daemon or persistent job database.
 - Sanitize delivered output: nonce framing, ANSI/control stripping, and best-effort secret redaction.
@@ -127,6 +125,25 @@ Expected:
 - TUI shows an active monitor job while the command is running.
 - After the match, OpenCode receives a visible synthetic prompt with the matched output.
 
+## Configuration
+
+The server plugin accepts options as the second element of its `plugin` entry tuple:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    ["./node_modules/opencode-monitor-plugin/dist/server.js", { "chatNotifications": false }]
+  ]
+}
+```
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `chatNotifications` | `true` | Announce each `/background` and `/monitor` job in chat when it spawns, so there is a visible log of the spawn and not just the sidebar indicator. Set `false` to deliver only the terminal result. |
+
+Spawn announcements are delivered through the same idle-aware path as every other delivery, so they queue while the session is busy. They are fired without awaiting the result, so a spawn announcement and a terminal result can arrive in either order.
+
 ## Idle/busy delivery model
 
 The plugin sends delivery requests to a local bridge. The bridge tracks opencode session status notifications:
@@ -134,7 +151,7 @@ The plugin sends delivery requests to a local bridge. The bridge tracks opencode
 - `idle`: queued deliveries for that session may flush.
 - `busy`, `retry`, or unknown: deliveries stay queued.
 
-The bridge delivers through hidden-transport visible synthetic prompts with `{ text, sessionID, visible: true }`. Visible synthetic prompts render with the opencode-injected header `◇ MCP · <server-name>`; clients do not provide the caller name. It rechecks session status before each queued delivery. `/loop` uses latest-only coalescing and adds coalesced tick metadata; `/background`, `/monitor`, and `/schedule` retain full payloads subject to caps. The plugin must not use visible prompt append for queued output, because append mutates the user's prompt input.
+The bridge delivers through hidden-transport visible synthetic prompts with `{ text, sessionID, visible: true }`. Visible synthetic prompts render with the opencode-injected header `◇ MCP · <server-name>`; clients do not provide the caller name. It rechecks session status before each queued delivery. `/loop` uses latest-only coalescing and adds coalesced tick metadata; `/background`, `/monitor`, and `/schedule` retain full payloads subject to caps. `/background` and `/monitor` additionally deliver a spawn announcement when they start, unless `chatNotifications` is disabled; because that announcement is not awaited, it and the terminal result may be delivered in either order. The plugin must not use visible prompt append for queued output, because append mutates the user's prompt input.
 
 ## Instance disposal
 
