@@ -26,6 +26,14 @@ export interface BridgeServerOptions {
   configPath?: string;
   host?: '127.0.0.1' | '::1';
   port?: number;
+  /**
+   * Open the loopback listener and publish bridge.json. Default true (v1, where
+   * out-of-process clients post notifications to it). v2 passes false: it
+   * delivers through the host's session API instead, so its listener would have
+   * no callers — while still overwriting the single shared bridge.json that v1
+   * clients read, pointing them at a port whose token they do not hold.
+   */
+  listen?: boolean;
   onAppend?: (payload: PromptSyntheticNotification) => boolean;
 }
 
@@ -199,6 +207,12 @@ export class BridgeServer {
 
   async start(): Promise<BridgeConfig> {
     if (this.#server) return this.#config!;
+    // No listener: the idle queue is all a v2 instance needs. Report a
+    // synthetic loopback config so callers that read it back still typecheck.
+    if (this.#options.listen === false) {
+      monitorDebug('bridge.listen.skipped', { reason: 'host delivers through its session API' });
+      return { url: 'http://127.0.0.1:0', token: '' };
+    }
     const host = this.#options.host ?? '127.0.0.1';
     if (host !== '127.0.0.1' && host !== '::1') {
       throw new Error('bridge host must be loopback');

@@ -82,6 +82,13 @@ interface OpencodePluginInput {
 
 interface MonitorServerOptions {
   chatNotifications?: boolean;
+  /**
+   * v2 delivers through the host's session API and instantiates the plugin per
+   * scope, so its loopback listener would have no callers while overwriting the
+   * one shared bridge.json that v1 clients read. The v1 loader leaves this
+   * unset (listen).
+   */
+  listenBridge?: boolean;
 }
 
 interface OpencodeConfigLike {
@@ -646,8 +653,9 @@ function armIdleFallback(bridge: BridgeServer, sessionID: string): void {
   }, 1500).unref?.();
 }
 
-export const server = async (input: OpencodePluginInput = {}, pluginOptions?: Record<string, unknown>): Promise<any> => {
+export const server = async (input: OpencodePluginInput = {}, pluginOptions?: Record<string, unknown>, hostOptions?: MonitorServerOptions): Promise<any> => {
   const serverOptions: MonitorServerOptions = {
+    ...hostOptions,
     chatNotifications: pluginOptions?.chatNotifications !== false,
   };
   const statusScope = input.worktree || input.directory || process.cwd();
@@ -673,6 +681,7 @@ export const server = async (input: OpencodePluginInput = {}, pluginOptions?: Re
     queueStatus(snapshot);
   };
   const bridge = new BridgeServer({
+    listen: serverOptions.listenBridge,
     onAppend: (payload) => {
       if (closing) return false;
       monitorDebug('server.bridge.onAppend', { jobID: payload.jobID, kind: payload.kind, sessionID: payload.params.sessionID, method: payload.method });

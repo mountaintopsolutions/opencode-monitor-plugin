@@ -114,6 +114,20 @@ describe('bridge config and bearer token handling', () => {
 });
 
 describe('BridgeServer HTTP API', () => {
+  it('opens no listener and writes no config when listen is false', async () => {
+    const configPath = await tempConfigPath();
+    const server = new BridgeServer({ configPath, listen: false });
+    servers.push(server);
+
+    await server.start();
+
+    // v2 instantiates the plugin per scope. With no listener there is nothing
+    // to connect to, and crucially no bridge.json rewrite — that file is a
+    // single shared path and v1 clients read it to find the port and token.
+    await expect(stat(configPath)).rejects.toThrow();
+    await expect(server.stop()).resolves.toBeUndefined();
+  });
+
   it('listens on loopback only and exposes unauthenticated health without secrets', async () => {
     const server = new BridgeServer({ configPath: await tempConfigPath() });
     servers.push(server);

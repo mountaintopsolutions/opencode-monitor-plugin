@@ -41,7 +41,11 @@ export const PLUGIN_ID = 'opencode-monitor';
 import { randomUUID } from 'node:crypto';
 import { monitorDebug } from './debug-log.js';
 
-type V1Factory = (input: any, options?: Record<string, unknown>) => Promise<any>;
+type V1Factory = (
+  input: any,
+  options?: Record<string, unknown>,
+  serverOptions?: { listenBridge?: boolean },
+) => Promise<any>;
 
 export interface V2Ctx {
   location: { directory: string };
@@ -214,6 +218,11 @@ async function createForV2(ctx: V2Ctx, server: V1Factory) {
       },
     },
     ctx.options,
+    // v2 delivers through ctx.session, so the bridge's loopback listener has no
+    // callers. It still instantiates once per scope and would overwrite the
+    // single shared bridge.json each time, pointing v1 clients at a port whose
+    // token they do not hold.
+    { listenBridge: false },
   );
 }
 
