@@ -547,12 +547,20 @@ describe('dual v1/v2 export shape', () => {
       event: { subscribe: () => ({ [Symbol.asyncIterator]: async function* () {} }) },
     };
     const cleanup = await mod.default.setup(ctx as any);
-    expect(added.tools.map((t) => t.name).sort()).toEqual(
-      ['background', 'cancel', 'jobs', 'loop', 'monitor', 'schedule'],
-    );
+    // Full v1 identifiers, registered without a namespace so the names the
+    // command templates hardcode cannot drift.
+    expect(added.tools.map((t) => t.name).sort()).toEqual([
+      'opencode_monitor_background',
+      'opencode_monitor_cancel',
+      'opencode_monitor_jobs',
+      'opencode_monitor_loop',
+      'opencode_monitor_monitor',
+      'opencode_monitor_schedule',
+    ]);
     for (const tool of added.tools) {
       expect(tool.input.type).toBe('object');
       expect(tool.input.additionalProperties).toBe(false);
+      expect(tool.options?.namespace).toBeUndefined();
       expect(typeof tool.execute).toBe('function');
     }
     expect(added.commands.map((c) => c.name).sort()).toEqual(

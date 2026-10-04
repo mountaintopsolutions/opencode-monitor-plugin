@@ -303,4 +303,77 @@ export const tui: TuiPlugin = async (api, options, _meta) => {
   });
 };
 
-export default { id, tui };
+/**
+ * OpenCode v2 terminal-client setup.
+ *
+ * v2 moved TUI plugins from `api.slots.register({ slots: { sidebar_title,
+ * sidebar_content } })` to `context.ui.slot({ append: <path>, render })` with
+ * dot-separated slot paths. The v1 `tui` export above is unchanged and remains
+ * the v1 entrypoint; this is the v2 half of the same dual shape.
+ *
+ * This module keeps compiling against the @opentui/solid version already in
+ * package.json so the v1 precompiled build is not broken; the v2 host supplies
+ * the runtime. The OpenTUI major-version tension is recorded in
+ * fork-changelog.md as an open risk.
+ */
+type V2TuiContext = {
+  location?: { directory?: string };
+  options?: Record<string, unknown>;
+  theme?: { text?: Color; textMuted?: Color };
+  data: { location: { default(): string } };
+  ui: {
+    slot(claim: { append: string; render: (input: any) => unknown }): () => void;
+  };
+};
+
+function v2Scope(context: V2TuiContext): string {
+  return context.location?.directory || context.data.location.default() || process.cwd();
+}
+
+export const setup = async (context: V2TuiContext): Promise<() => void> => {
+  const display = readDisplayMode(context.options);
+  const scopePath = v2Scope(context);
+  monitorDebug('tui.v2.init', { scope: scopePath, display });
+
+  const unregisterSidebar = context.ui.slot({
+    append: 'sidebar.content',
+    render: (input: { sessionID?: string }) => {
+      const jobs = readMonitorStatus(scopePath).jobs.filter(
+        (job) => !input.sessionID || job.sessionID === input.sessionID,
+      );
+      if (jobs.length === 0) return null;
+      return (
+        <box flexDirection="column" paddingRight={1}>
+          <text fg={context.theme?.text}>
+            <b>OpenCode jobs</b>
+          </text>
+          <For each={jobs}>
+            {(job: MonitorIndicatorJob) => (
+              <text fg={context.theme?.textMuted}>
+                {job.kind} {job.status}
+              </text>
+            )}
+          </For>
+        </box>
+      );
+    },
+  });
+
+  const unregisterFooter = context.ui.slot({
+    append: 'prompt.footer.status',
+    render: () => {
+      const active = readMonitorStatus(scopePath).jobs.filter((job) => job.status === 'active').length;
+      if (active === 0) return null;
+      return <text fg={context.theme?.textMuted}>{active} running</text>;
+    },
+  });
+
+  return () => {
+    unregisterSidebar();
+    unregisterFooter();
+  };
+};
+
+// Single default export satisfying both TUI loaders: v1 reads `tui`, v2 reads
+// `id` + `setup`. Mirrors the server entry's dual shape.
+export default { id, tui, setup };
