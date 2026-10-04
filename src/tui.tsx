@@ -319,7 +319,7 @@ export const tui: TuiPlugin = async (api, options, _meta) => {
 type V2TuiContext = {
   location?: { directory?: string };
   options?: Record<string, unknown>;
-  theme?: { text?: Color; textMuted?: Color };
+  theme?: Partial<Theme>;
   data: { location: { default(): string } };
   ui: {
     slot(claim: { append: string; render: (input: any) => unknown }): () => void;
@@ -330,49 +330,159 @@ function v2Scope(context: V2TuiContext): string {
   return context.location?.directory || context.data.location.default() || process.cwd();
 }
 
+/**
+ * Poll the status file once a second.
+ *
+ * Signals and the interval are created in setup() rather than inside render():
+ * Solid's onCleanup is unavailable outside a reactive root, and slot render
+ * functions are not guaranteed to run in one. Owning the timer here also means
+ * the returned cleanup is the only place that stops it.
+ */
+function useV2MonitorData(scopePath: string) {
+  const [jobs, setJobs] = createSignal<MonitorIndicatorJob[]>([]);
+  const [snapshot, setSnapshot] = createSignal<MonitorIndicatorSnapshot | null>(null);
+  const refresh = () => {
+    const snap = readMonitorStatus(scopePath);
+    setJobs(snap.jobs);
+    setSnapshot(snap);
+  };
+  refresh();
+  const timer = setInterval(refresh, 1000);
+  return { jobs, snapshot, stop: () => clearInterval(timer) };
+}
+
 export const setup = async (context: V2TuiContext): Promise<() => void> => {
   const display = readDisplayMode(context.options);
   const scopePath = v2Scope(context);
+  const { jobs, snapshot, stop } = useV2MonitorData(scopePath);
   monitorDebug('tui.v2.init', { scope: scopePath, display });
+
+  // v2's ResolvedTheme is not the v1 TuiPluginApi theme, so tokens are read
+  // defensively: a missing token renders uncoloured rather than throwing.
+  const th = () => (context.theme ?? {}) as Theme;
+  const animate = () => context.options?.animations !== false;
+
+  const Dot = (props: { color?: Color }) =>
+    animate() ? (
+      <spinner frames={SPINNER_FRAMES} interval={80} color={props.color} />
+    ) : (
+      <text fg={props.color} flexShrink={0}>●</text>
+    );
+
+  // Mirrors the v1 Detail view: header counts, then one line per job in the
+  // scope (including subagent-spawned ones, per the scope-wide jobs feature).
+  const Detail = () => {
+    // Accessors, not bare reads: a Solid component body runs once, so
+    // `const all = jobs()` would freeze whatever was there at creation and the
+    // sidebar would sit on "jobs idle" while the footer counted live jobs.
+    const all = () => jobs();
+    const snap = () => snapshot();
+    const activeCount = createMemo(() => all().filter((job) => job.status === 'active').length);
+    return (
+      <Show when={all().length > 0} fallback={<text fg={th().textMuted}>○ jobs idle</text>}>
+        <box>
+          <box flexDirection="row" gap={1}>
+            <Show when={activeCount() > 0} fallback={<text fg={th().textMuted}>●</text>}>
+              <Dot color={th().warning} />
+            </Show>
+            <text fg={th().text}>
+              <b>OpenCode jobs</b>{' '}
+              <span style={{ fg: th().textMuted }}>
+                {activeCount() > 0 ? <span style={{ fg: th().warning }}>{activeCount()} active</span> : null}
+                {(snap()?.queueDepth ?? 0) > 0 ? ' · ' : null}
+                {(snap()?.queueDepth ?? 0) > 0 ? <span style={{ fg: th().info }}>{snap()!.queueDepth} queued</span> : null}
+                {(snap()?.completedCount ?? 0) > 0 ? ' · ' : null}
+                {(snap()?.completedCount ?? 0) > 0 ? <span style={{ fg: th().success }}>{snap()!.completedCount} done</span> : null}
+                {(snap()?.failedCount ?? 0) > 0 ? ' · ' : null}
+                {(snap()?.failedCount ?? 0) > 0 ? <span style={{ fg: th().error }}>{snap()!.failedCount} failed</span> : null}
+              </span>
+            </text>
+          </box>
+          <For each={all()}>
+            {(job: MonitorIndicatorJob) => {
+              const badge = deliveryBadge(job.deliveryStatus, th());
+              return (
+                <box flexDirection="row" gap={1}>
+                  <Show
+                    when={job.status === 'active'}
+                    fallback={<text fg={kindColor(th(), job.kind)} flexShrink={0}>●</text>}
+                  >
+                    <Dot color={kindColor(th(), job.kind)} />
+                  </Show>
+                  <text fg={th().text} wrapMode="none">
+                    <b>{job.jobID}</b>{' '}
+                    <span style={{ fg: kindColor(th(), job.kind) }}>{title(job.kind)}</span>{' '}
+                    <span style={{ fg: statusColor(th(), job.status) }}>{statusLabel(job.status)}</span>{' '}
+                    <span style={{ fg: th().textMuted }}>{formatElapsed(Date.now() - (job.createdAt || Date.now()))}</span>{' '}
+                    <span style={{ fg: badge.color }}>{badge.text}</span>
+                  </text>
+                </box>
+              );
+            }}
+          </For>
+          <text fg={th().textMuted}>/cancel to stop</text>
+        </box>
+      </Show>
+    );
+  };
+
+  // Mirrors the v1 Compact view: per-kind counts, elapsed, queue depth, bridge.
+  const Compact = () => {
+    const all = () => jobs();
+    const snap = () => snapshot();
+    const badgeCounts = createMemo(() => counts(all()));
+    const elapsed = createMemo(() => maxElapsed(all()));
+    return (
+      <Show when={all().length > 0} fallback={<text fg={th().textMuted}>○ jobs idle</text>}>
+        <box flexDirection="row" gap={1}>
+          <Dot color={th().warning} />
+          <text>
+            <For each={badgeCounts()}>
+              {(item, i) => (
+                <>
+                  <Show when={i() > 0}>
+                    <span style={{ fg: th().textMuted }}> · </span>
+                  </Show>
+                  <span style={{ fg: kindColor(th(), item.kind) }}>{item.kind}×{item.count}</span>
+                </>
+              )}
+            </For>
+          </text>
+          <Show when={elapsed() > 0}>
+            <text fg={th().textMuted}>⏱{formatElapsed(elapsed())}</text>
+          </Show>
+          <Show when={(snap()?.queueDepth ?? 0) > 0}>
+            <text fg={th().info}>␐{snap()!.queueDepth}</text>
+          </Show>
+          <Show when={snap()?.bridgeUp === false}>
+            <text fg={th().error}>⚡bridge↓</text>
+          </Show>
+        </box>
+      </Show>
+    );
+  };
 
   const unregisterSidebar = context.ui.slot({
     append: 'sidebar.content',
-    render: (input: { sessionID?: string }) => {
-      const jobs = readMonitorStatus(scopePath).jobs.filter(
-        (job) => !input.sessionID || job.sessionID === input.sessionID,
-      );
-      if (jobs.length === 0) return null;
-      return (
-        <box flexDirection="column" paddingRight={1}>
-          <text fg={context.theme?.text}>
-            <b>OpenCode jobs</b>
-          </text>
-          <For each={jobs}>
-            {(job: MonitorIndicatorJob) => (
-              <text fg={context.theme?.textMuted}>
-                {job.kind} {job.status}
-              </text>
-            )}
-          </For>
-        </box>
-      );
-    },
+    render: () => (display === 'compact' ? <Compact /> : <Detail />),
   });
 
   const unregisterFooter = context.ui.slot({
     append: 'prompt.footer.status',
     render: () => {
-      const active = readMonitorStatus(scopePath).jobs.filter((job) => job.status === 'active').length;
+      const active = jobs().filter((job) => job.status === 'active').length;
       if (active === 0) return null;
-      return <text fg={context.theme?.textMuted}>{active} running</text>;
+      return <text fg={th().textMuted}>{active} running</text>;
     },
   });
 
   return () => {
+    stop();
     unregisterSidebar();
     unregisterFooter();
   };
 };
+
 
 // Single default export satisfying both TUI loaders: v1 reads `tui`, v2 reads
 // `id` + `setup`. Mirrors the server entry's dual shape.
